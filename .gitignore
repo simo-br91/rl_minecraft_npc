@@ -1,0 +1,32 @@
+# eclipse
+minecraft_mod/bin
+minecraft_mod/*.launch
+minecraft_mod/.settings
+minecraft_mod/.metadata
+minecraft_mod/.classpath
+minecraft_mod/.project
+
+# idea
+minecraft_mod/out
+minecraft_mod/*.ipr
+minecraft_mod/*.iws
+minecraft_mod/*.iml
+minecraft_mod/.idea
+
+# gradle
+minecraft_mod/build
+minecraft_mod/.gradle
+
+# other
+minecraft_mod/eclipse
+minecraft_mod/run
+
+# Files from Forge MDK
+minecraft_mod/forge*changelog.txt
+
+#Python
+python_rl/__pycache__
+python_rl/.venv
+python_rl/env/__pycache__
+python_rl/eval/__pycache__
+python_rl/train/__pycache__
