@@ -19,7 +19,7 @@ def main():
         policy="MlpPolicy",
         env=env,
         verbose=1,
-        n_steps=512,
+        n_steps=40,
         batch_size=128,
         learning_rate=3e-4,
         gamma=0.99,

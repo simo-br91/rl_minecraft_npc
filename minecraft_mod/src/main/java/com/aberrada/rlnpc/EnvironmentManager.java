@@ -53,34 +53,37 @@ public class EnvironmentManager {
             return errorJson("No player found. Open a singleplayer world first.");
         }
 
+        // Schedule block changes on the main server thread
+        server.execute(() -> {
+            ServerLevel level = observer.serverLevel();
+            clearTaskArtifacts(level);
+            state.setTask(taskName);
+            if ("farming".equals(state.taskName)) {
+                configureFarmingTask(level);
+            } else {
+                configureNavigationTask(level);
+            }
+            RLNpcEntity agent = getOrCreateAgent(level);
+            if ("farming".equals(state.taskName)) {
+                double spawnX = state.targetX - 1.4;
+                double spawnZ = state.targetZ;
+                double spawnY = resolveStandY(level, spawnX, spawnZ);
+                placeAgent(agent, spawnX, spawnY, spawnZ, -90.0f);
+            } else {
+                double spawnY = resolveStandY(level, NAV_SPAWN_X, NAV_SPAWN_Z);
+                placeAgent(agent, NAV_SPAWN_X, spawnY, NAV_SPAWN_Z, NAV_SPAWN_YAW);
+            }
+            placeMarker(level);
+            double initialDistance = distanceToTarget(agent);
+            state.reset(initialDistance);
+        });
+
+        // Small sleep to let the main thread finish before we read state
+        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+
         ServerLevel level = observer.serverLevel();
-        clearTaskArtifacts(level);
-        state.setTask(taskName);
-
-        if ("farming".equals(state.taskName)) {
-            configureFarmingTask(level);
-        } else {
-            configureNavigationTask(level);
-        }
-
         RLNpcEntity agent = getOrCreateAgent(level);
-
-        if ("farming".equals(state.taskName)) {
-            // Spawn near the stand position west of the crop and face east toward it.
-            double spawnX = state.targetX - 1.4;
-            double spawnZ = state.targetZ;
-            double spawnY = resolveStandY(level, spawnX, spawnZ);
-            placeAgent(agent, spawnX, spawnY, spawnZ, -90.0f);
-        } else {
-            double spawnY = resolveStandY(level, NAV_SPAWN_X, NAV_SPAWN_Z);
-            placeAgent(agent, NAV_SPAWN_X, spawnY, NAV_SPAWN_Z, NAV_SPAWN_YAW);
-        }
-
-        placeMarker(level);
-
         double initialDistance = distanceToTarget(agent);
-        state.reset(initialDistance);
-
         double[] obs = ObservationBuilder.build(agent, state);
         Map<String, Object> info = buildInfo(false, initialDistance, taskProgress(agent));
         return jsonResponse(obs, 0.0, false, false, info);
@@ -244,7 +247,7 @@ public class EnvironmentManager {
         BlockState block = level.getBlockState(frontPos);
 
         if (block.getBlock() instanceof CropBlock cropBlock && cropBlock.isMaxAge(block)) {
-            level.destroyBlock(frontPos, true, agent);
+            server.execute(() -> level.destroyBlock(frontPos, true, agent));
             state.lastInteractValid = true;
             return true;
         }
