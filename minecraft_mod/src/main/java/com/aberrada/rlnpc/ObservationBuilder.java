@@ -64,7 +64,7 @@ public class ObservationBuilder {
 
     public static BlockPos frontCropPos(RLNpcEntity agent) {
         Vec3 look = horizontalLook(agent);
-        Vec3 origin = agent.position().add(0.0, 1.0, 0.0);
+        Vec3 origin = agent.position().add(0.0, 0.5, 0.0);
         Vec3 front = origin.add(look.scale(0.9));
         return BlockPos.containing(front.x, origin.y, front.z);
     }

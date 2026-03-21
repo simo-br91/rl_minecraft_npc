@@ -9,6 +9,9 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
 public class BridgeServer {
     private static final int PORT = 8765;
 
@@ -79,36 +82,20 @@ public class BridgeServer {
     }
 
     private int extractAction(String body) {
-        if (body == null || body.isBlank()) return 4;
-        String trimmed = body.trim();
         try {
-            return Integer.parseInt(trimmed);
-        } catch (NumberFormatException ignored) {
+            JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
+            return obj.get("action").getAsInt();
+        } catch (Exception e) {
+            return 4; // no_op fallback
         }
-
-        int colon = trimmed.indexOf(':');
-        if (colon >= 0) {
-            String right = trimmed.substring(colon + 1).replaceAll("[^0-9\\-]", "");
-            if (!right.isBlank()) {
-                try {
-                    return Integer.parseInt(right);
-                } catch (NumberFormatException ignored) {
-                }
-            }
-        }
-        return 4;
     }
 
     private String extractStringField(String body, String field, String defaultValue) {
-        if (body == null || body.isBlank()) return defaultValue;
-        String pattern = "\"" + field + "\"";
-        int start = body.indexOf(pattern);
-        if (start < 0) return defaultValue;
-        int colon = body.indexOf(':', start + pattern.length());
-        if (colon < 0) return defaultValue;
-        int q1 = body.indexOf('"', colon + 1);
-        int q2 = body.indexOf('"', q1 + 1);
-        if (q1 < 0 || q2 < 0) return defaultValue;
-        return body.substring(q1 + 1, q2);
+        try {
+            JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
+            return obj.has(field) ? obj.get(field).getAsString() : defaultValue;
+        } catch (Exception e) {
+            return defaultValue;
+        }
     }
 }

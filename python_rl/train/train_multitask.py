@@ -17,7 +17,7 @@ def main():
     env = Monitor(env, filename=str(logs_dir / "multitask_day2_playernpc_monitor.csv"))
 
     warm_start_candidates = [
-        checkpoints_dir / "farm_day2_playernpc_run1",
+        checkpoints_dir / "farm_day2_run1",
         checkpoints_dir / "nav_day1_run1",
     ]
 

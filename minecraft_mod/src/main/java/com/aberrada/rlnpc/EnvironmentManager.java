@@ -37,6 +37,8 @@ public class EnvironmentManager {
     private static final double STUCK_EPS = 0.01;
     private static final int STUCK_LIMIT = 8;
 
+    private static final double MAX_EPISODE_DISTANCE = 15.0;
+
     private final MinecraftServer server;
     private final EpisodeState state;
 
@@ -121,7 +123,8 @@ public class EnvironmentManager {
         }
 
         boolean success = computeSuccess(level, agent);
-        boolean truncated = state.episodeStep >= state.maxSteps;
+        boolean truncated = state.episodeStep >= state.maxSteps
+            || distanceToTarget(agent) > MAX_EPISODE_DISTANCE;
         state.success = success;
         state.done = success || truncated;
 
