@@ -33,7 +33,7 @@ def evaluate_task(model, task_name, episodes=10):
 
 
 def main():
-    model = PPO.load("python_rl/checkpoints/multitask_day2_playernpc_run1")
+    model = PPO.load("python_rl/checkpoints/multitask_day2_run1")
     for task in ["navigation", "farming"]:
         print(evaluate_task(model, task))
 

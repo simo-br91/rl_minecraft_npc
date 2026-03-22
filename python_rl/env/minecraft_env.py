@@ -13,8 +13,8 @@ class MinecraftEnv(gym.Env):
         self.fixed_task = task
         self.sample_tasks = sample_tasks
 
-        # 0 forward, 1 turn_left, 2 turn_right, 3 interact, 4 no_op
-        self.action_space = spaces.Discrete(5)
+        # 0 forward, 1 turn_left, 2 turn_right, 3 interact, 4 no_op, 5 jump
+        self.action_space = spaces.Discrete(6)
 
         # [dx, dz, distance, yaw_norm, blocked_front, on_ground, stuck_norm, task_id, crop_in_front, near_target]
         self.observation_space = spaces.Box(

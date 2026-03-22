@@ -4,7 +4,7 @@ from python_rl.env.minecraft_env import MinecraftEnv
 
 def main():
     env = MinecraftEnv()
-    model = PPO.load("python_rl/checkpoints/nav_day1_run1")
+    model = PPO.load("python_rl/checkpoints/nav_day2_run1")
 
     obs, info = env.reset()
     done = False

@@ -30,11 +30,11 @@ public class EpisodeState {
         if ("farming".equalsIgnoreCase(task)) {
             this.taskName = "farming";
             this.taskId = 1.0;
-            this.maxSteps = 120;
+            this.maxSteps = 200;
         } else {
             this.taskName = "navigation";
             this.taskId = 0.0;
-            this.maxSteps = 100;
+            this.maxSteps = 150;
         }
     }
 

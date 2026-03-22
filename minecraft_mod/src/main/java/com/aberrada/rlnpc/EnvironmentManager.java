@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Random;
 
 public class EnvironmentManager {
     private static final double NAV_SPAWN_X = 0.0;
@@ -37,7 +38,9 @@ public class EnvironmentManager {
     private static final double STUCK_EPS = 0.01;
     private static final int STUCK_LIMIT = 8;
 
-    private static final double MAX_EPISODE_DISTANCE = 15.0;
+    private static final double MAX_EPISODE_DISTANCE = 20.0;
+
+    private final Random rng = new Random();
 
     private final MinecraftServer server;
     private final EpisodeState state;
@@ -56,24 +59,39 @@ public class EnvironmentManager {
         // Schedule block changes on the main server thread
         server.execute(() -> {
             ServerLevel level = observer.serverLevel();
+
+            // Clear previous farm area BEFORE nulling state fields
+            if ("farming".equals(state.taskName) && state.farmingSoilPos != null) {
+                clearFarmArea(level, state.farmingSoilPos.getX(), state.farmingSoilPos.getZ());
+            }
             clearTaskArtifacts(level);
+
             state.setTask(taskName);
+
             if ("farming".equals(state.taskName)) {
                 configureFarmingTask(level);
+                // Spawn 3–5 blocks from crop, random direction, random yaw
+                double spawnAngle = rng.nextDouble() * 2.0 * Math.PI;
+                double spawnDist  = 3.0 + rng.nextDouble() * 2.0;
+                double spawnX = state.targetX + Math.cos(spawnAngle) * spawnDist;
+                double spawnZ = state.targetZ + Math.sin(spawnAngle) * spawnDist;
+                double spawnY = resolveStandY(level, spawnX, spawnZ);
+                float  spawnYaw = (float)(rng.nextDouble() * 360.0 - 180.0);
+                RLNpcEntity agent = getOrCreateAgent(level);
+                placeAgent(agent, spawnX, spawnY, spawnZ, spawnYaw);
             } else {
                 configureNavigationTask(level);
-            }
-            RLNpcEntity agent = getOrCreateAgent(level);
-            if ("farming".equals(state.taskName)) {
-                double spawnX = state.targetX - 1.4;
-                double spawnZ = state.targetZ;
+                // Spawn near origin, random yaw
+                double spawnX = (rng.nextDouble() - 0.5) * 2.0;
+                double spawnZ = (rng.nextDouble() - 0.5) * 2.0;
                 double spawnY = resolveStandY(level, spawnX, spawnZ);
-                placeAgent(agent, spawnX, spawnY, spawnZ, -90.0f);
-            } else {
-                double spawnY = resolveStandY(level, NAV_SPAWN_X, NAV_SPAWN_Z);
-                placeAgent(agent, NAV_SPAWN_X, spawnY, NAV_SPAWN_Z, NAV_SPAWN_YAW);
+                float  spawnYaw = (float)(rng.nextDouble() * 360.0 - 180.0);
+                RLNpcEntity agent = getOrCreateAgent(level);
+                placeAgent(agent, spawnX, spawnY, spawnZ, spawnYaw);
             }
+
             placeMarker(level);
+            RLNpcEntity agent = getOrCreateAgent(level);
             double initialDistance = distanceToTarget(agent);
             state.reset(initialDistance);
         });
@@ -111,6 +129,8 @@ public class EnvironmentManager {
         boolean validAction;
         if (action == 3) {
             validAction = handleInteract(level, agent);
+        } else if (action == 5 && !agent.onGround()) {
+            validAction = false;   // penalise mid-air jump attempts
         } else {
             validAction = ActionExecutor.applyMovementAction(agent, action);
         }
@@ -188,54 +208,48 @@ public class EnvironmentManager {
     }
 
     private void configureNavigationTask(ServerLevel level) {
-        state.targetX = NAV_TARGET_X;
-        state.targetY = resolveGroundY(level, NAV_TARGET_X, NAV_TARGET_Z) + 1.0;
-        state.targetZ = NAV_TARGET_Z;
+        double angle = rng.nextDouble() * 2.0 * Math.PI;
+        double dist  = 7.0 + rng.nextDouble() * 7.0;          // 7 to 14 blocks
+        state.targetX = Math.round(Math.cos(angle) * dist);
+        state.targetZ = Math.round(Math.sin(angle) * dist);
+        state.targetY = resolveGroundY(level, state.targetX, state.targetZ) + 1.0;
     }
 
     private void configureFarmingTask(ServerLevel level) {
-        clearFarmArea(level);
+        int farmX = FARM_X + rng.nextInt(7) - 3;   // ±3 blocks
+        int farmZ = FARM_Z + rng.nextInt(7) - 3;
 
-        int groundY = getReferenceGroundY(level, FARM_REF_X, FARM_REF_Z);
-        BlockPos soilPos = new BlockPos(FARM_X, groundY, FARM_Z);
+        int groundY = getReferenceGroundY(level, farmX, farmZ);
+        BlockPos soilPos = new BlockPos(farmX, groundY, farmZ);
         BlockPos cropPos = soilPos.above();
 
         level.setBlockAndUpdate(soilPos, Blocks.FARMLAND.defaultBlockState());
-
         CropBlock wheat = (CropBlock) Blocks.WHEAT;
-        BlockState matureWheat = wheat.getStateForAge(wheat.getMaxAge());
-        level.setBlockAndUpdate(cropPos, matureWheat);
+        level.setBlockAndUpdate(cropPos, wheat.getStateForAge(wheat.getMaxAge()));
 
-        // Important: target the stand position WEST of the crop, not the crop center.
-        state.targetX = FARM_X - 0.5;
+        // Target: just west of crop center
+        state.targetX = farmX - 0.5;
         state.targetY = cropPos.getY();
-        state.targetZ = FARM_Z + 0.5;
+        state.targetZ = farmZ + 0.5;
 
         state.farmingSoilPos = soilPos;
         state.farmingCropPos = cropPos;
     }
 
-    private void clearFarmArea(ServerLevel level) {
-        int groundY = getReferenceGroundY(level, FARM_REF_X, FARM_REF_Z);
-
-        for (int x = FARM_X - 1; x <= FARM_X + 1; x++) {
-            for (int z = FARM_Z - 1; z <= FARM_Z + 1; z++) {
+    private void clearFarmArea(ServerLevel level, int centerX, int centerZ) {
+        int groundY = getReferenceGroundY(level, centerX, centerZ);
+        for (int x = centerX - 1; x <= centerX + 1; x++) {
+            for (int z = centerZ - 1; z <= centerZ + 1; z++) {
                 for (int y = groundY; y <= groundY + 4; y++) {
                     BlockPos pos = new BlockPos(x, y, z);
-                    BlockState current = level.getBlockState(pos);
-                    if (!current.is(Blocks.BEDROCK)) {
-                        if (y == groundY) {
-                            level.setBlockAndUpdate(pos, Blocks.GRASS_BLOCK.defaultBlockState());
-                        } else {
-                            level.setBlockAndUpdate(pos, Blocks.AIR.defaultBlockState());
-                        }
+                    if (!level.getBlockState(pos).is(Blocks.BEDROCK)) {
+                        level.setBlockAndUpdate(pos, y == groundY
+                                ? Blocks.GRASS_BLOCK.defaultBlockState()
+                                : Blocks.AIR.defaultBlockState());
                     }
                 }
             }
         }
-
-        state.farmingCropPos = null;
-        state.farmingSoilPos = null;
     }
 
     private boolean handleInteract(ServerLevel level, RLNpcEntity agent) {
@@ -345,14 +359,14 @@ public class EnvironmentManager {
 
     private void placeMarker(ServerLevel level) {
         BlockPos markerPos;
-        if ("farming".equals(state.taskName)) {
-            // Marker near the crop, not on the stand target.
-            markerPos = new BlockPos(FARM_X, (int) Math.round(state.targetY), FARM_Z + 1);
+        if ("farming".equals(state.taskName) && state.farmingCropPos != null) {
+            // Place emerald one block east of the crop so it doesn't replace wheat
+            markerPos = state.farmingCropPos.east();
             level.setBlockAndUpdate(markerPos, Blocks.EMERALD_BLOCK.defaultBlockState());
         } else {
             int markerX = (int) Math.floor(state.targetX);
-            int groundY = (int) Math.floor(resolveGroundY(level, state.targetX, state.targetZ));
-            int markerZ = (int) Math.floor(state.targetZ);
+            int groundY  = (int) Math.floor(resolveGroundY(level, state.targetX, state.targetZ));
+            int markerZ  = (int) Math.floor(state.targetZ);
             markerPos = new BlockPos(markerX, groundY + 1, markerZ);
             level.setBlockAndUpdate(markerPos, Blocks.GOLD_BLOCK.defaultBlockState());
         }

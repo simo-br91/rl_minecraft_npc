@@ -15,6 +15,7 @@ public class ActionExecutor {
             case 1 -> turnLeft(agent);
             case 2 -> turnRight(agent);
             case 4 -> true;
+            case 5 -> jump(agent);
             default -> false;
         };
     }
@@ -53,6 +54,19 @@ public class ActionExecutor {
     private static boolean rotateInPlace(RLNpcEntity agent, float newYaw) {
         agent.moveTo(agent.getX(), agent.getY(), agent.getZ(), newYaw, 0.0f);
         syncRotations(agent, newYaw);
+        return true;
+    }
+
+    private static boolean jump(RLNpcEntity agent) {
+        if (!agent.onGround()) {
+            return false;   // can't jump mid-air
+        }
+        agent.setDeltaMovement(
+            agent.getDeltaMovement().x,
+            0.42,           // same impulse vanilla uses
+            agent.getDeltaMovement().z
+        );
+        agent.hasImpulse = true;  // tells the client to sync the motion packet
         return true;
     }
 

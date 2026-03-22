@@ -19,7 +19,7 @@ def main():
         policy="MlpPolicy",
         env=env,
         verbose=1,
-        n_steps=40,
+        n_steps=512,
         batch_size=128,
         learning_rate=3e-4,
         gamma=0.99,
@@ -29,8 +29,9 @@ def main():
         tensorboard_log=str(logs_dir / "tb"),
     )
 
-    model.learn(total_timesteps=30000)
+    model.learn(total_timesteps=60000)
     model.save(str(checkpoints_dir / "farm_day2_run1"))
+    
     env.close()
 
     print("Training complete. Model saved to python_rl/checkpoints/farm_day2_run1")

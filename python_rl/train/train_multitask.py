@@ -17,9 +17,10 @@ def main():
     env = Monitor(env, filename=str(logs_dir / "multitask_day2_playernpc_monitor.csv"))
 
     warm_start_candidates = [
-        checkpoints_dir / "farm_day2_run1",
-        checkpoints_dir / "nav_day1_run1",
-    ]
+    checkpoints_dir / "farm_day2_run1",
+    checkpoints_dir / "nav_day2_run1",
+    checkpoints_dir / "nav_day1_run1",
+]
 
     model = None
     for model_path in warm_start_candidates:
@@ -45,11 +46,12 @@ def main():
             tensorboard_log=str(logs_dir / "tb"),
         )
 
-    model.learn(total_timesteps=40000, reset_num_timesteps=False)
-    model.save(str(checkpoints_dir / "multitask_day2_playernpc_run1"))
+    model.learn(total_timesteps=80000, reset_num_timesteps=False)
+    model.save(str(checkpoints_dir / "multitask_day2_run1"))
+    
     env.close()
 
-    print("Training complete. Model saved to python_rl/checkpoints/multitask_day2_playernpc_run1")
+    print("Training complete. Model saved to python_rl/checkpoints/multitask_day2_run1")
 
 
 if __name__ == "__main__":
