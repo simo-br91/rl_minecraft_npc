@@ -36,8 +36,17 @@ public class BridgeServer {
                     return;
                 }
                 String body = readBody(exchange);
+
+                // Core task field
                 String task = extractStringField(body, "task", "navigation");
-                String result = environmentManager.reset(task);
+
+                // Experiment config fields — all optional, defaults keep existing behaviour
+                boolean sparseReward  = extractBoolField(body, "sparse_reward", false);
+                double  minDist       = extractDoubleField(body, "min_dist",      -1.0);
+                double  maxDist       = extractDoubleField(body, "max_dist",      -1.0);
+                int     numObstacles  = extractIntField(body, "num_obstacles",    -1);
+
+                String result = environmentManager.reset(task, sparseReward, minDist, maxDist, numObstacles);
                 sendJson(exchange, 200, result);
             });
 
@@ -46,8 +55,8 @@ public class BridgeServer {
                     sendJson(exchange, 405, "{\"error\":\"Use POST\"}");
                     return;
                 }
-                String body = readBody(exchange);
-                int action = extractAction(body);
+                String body   = readBody(exchange);
+                int    action = extractIntField(body, "action", 4);
                 String result = environmentManager.step(action);
                 sendJson(exchange, 200, result);
             });
@@ -66,6 +75,10 @@ public class BridgeServer {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // HTTP helpers
+    // -----------------------------------------------------------------------
+
     private void sendJson(HttpExchange exchange, int code, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
@@ -81,19 +94,41 @@ public class BridgeServer {
         }
     }
 
-    private int extractAction(String body) {
-        try {
-            JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
-            return obj.get("action").getAsInt();
-        } catch (Exception e) {
-            return 4; // no_op fallback
-        }
-    }
+    // -----------------------------------------------------------------------
+    // JSON field extractors
+    // -----------------------------------------------------------------------
 
     private String extractStringField(String body, String field, String defaultValue) {
         try {
             JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
             return obj.has(field) ? obj.get(field).getAsString() : defaultValue;
+        } catch (Exception e) {
+            return defaultValue;
+        }
+    }
+
+    private boolean extractBoolField(String body, String field, boolean defaultValue) {
+        try {
+            JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
+            return obj.has(field) ? obj.get(field).getAsBoolean() : defaultValue;
+        } catch (Exception e) {
+            return defaultValue;
+        }
+    }
+
+    private int extractIntField(String body, String field, int defaultValue) {
+        try {
+            JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
+            return obj.has(field) ? obj.get(field).getAsInt() : defaultValue;
+        } catch (Exception e) {
+            return defaultValue;
+        }
+    }
+
+    private double extractDoubleField(String body, String field, double defaultValue) {
+        try {
+            JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
+            return obj.has(field) ? obj.get(field).getAsDouble() : defaultValue;
         } catch (Exception e) {
             return defaultValue;
         }

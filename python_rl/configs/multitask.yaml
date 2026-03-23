@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------
+# Experiment: Multi-task shared policy (navigation + farming)
+# ---------------------------------------------------------------
+# Purpose: demonstrate a single PPO policy learning both skills.
+# Task sampling: farming is drawn 2x more often (harder task).
+#
+# Warm-start strategy (handled in train_multitask.py):
+#   1. farm_run1 if it exists
+#   2. nav_shaped_run1 otherwise
+#   3. cold start as last resort
+# ---------------------------------------------------------------
+experiment_name: multitask
+
+# Task
+# sample_tasks encodes the sampling distribution:
+#   2 "farming" entries vs 1 "navigation" => 2:1 farming bias
+sample_tasks:
+  - farming
+  - farming
+  - navigation
+reward_type: shaped
+
+# Curriculum
+curriculum: false
+
+# Episode budget
+# Shorter than single-task runs because we warm-start from pretrained
+# single-task checkpoints rather than training from scratch.
+total_timesteps: 200000
+
+# PPO hyperparameters
+n_steps: 2048
+batch_size: 256
+n_epochs: 10
+learning_rate: 3.0e-4
+gamma: 0.99
+gae_lambda: 0.95
+ent_coef: 0.03             # ↓ vs single-task: warm-start reduces need for exploration
+clip_range: 0.2
+net_arch: [256, 256]
+
+# Output paths
+checkpoint_name: multitask_run1
+monitor_log: multitask_monitor.csv
+success_log: multitask_success.csv

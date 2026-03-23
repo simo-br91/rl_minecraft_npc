@@ -32,8 +32,12 @@ public class EnvironmentManager {
     private static final int    STUCK_LIMIT           = 8;
     private static final double MAX_EPISODE_DISTANCE  = 30.0;
 
-    private static final int FARM_X     = 6;
-    private static final int FARM_Z     = 2;
+    // Navigation defaults (used when no curriculum override is given)
+    private static final double NAV_DEFAULT_MIN_DIST = 7.0;
+    private static final double NAV_DEFAULT_MAX_DIST = 14.0;
+
+    private static final int FARM_X = 6;
+    private static final int FARM_Z = 2;
 
     // ------------------------------------------------------------------
     // Fields
@@ -54,10 +58,20 @@ public class EnvironmentManager {
 
     /**
      * Resets the environment for a new episode.
-     * All world/entity manipulation is scheduled on the main server thread
-     * via CompletableFuture to avoid race conditions with the game tick.
+     *
+     * @param taskName        "navigation" or "farming"
+     * @param sparseReward    true  → only terminal reward (+10 success / tiny step penalty)
+     *                        false → full shaped reward (default)
+     * @param minDist         minimum XZ distance to target; pass -1 for task default
+     * @param maxDist         maximum XZ distance to target; pass -1 for task default
+     * @param numObstacles    number of 1-block wall obstacles; pass -1 for random 1–2
      */
-    public synchronized String reset(String taskName) {
+    public synchronized String reset(String taskName,
+                                     boolean sparseReward,
+                                     double  minDist,
+                                     double  maxDist,
+                                     int     numObstacles) {
+
         ServerPlayer observer = getObserverPlayer();
         if (observer == null) return errorJson("No player found. Open a singleplayer world first.");
 
@@ -67,13 +81,18 @@ public class EnvironmentManager {
             try {
                 ServerLevel level = observer.serverLevel();
 
-                // Clear any blocks from the previous episode
+                // Clear artifacts from the previous episode
                 if ("farming".equals(state.taskName) && state.farmingSoilPos != null) {
                     clearFarmArea(level, state.farmingSoilPos.getX(), state.farmingSoilPos.getZ());
                 }
                 clearTaskArtifacts(level);
 
+                // Configure task & store experiment-level flags in state
                 state.setTask(taskName);
+                state.sparseReward           = sparseReward;
+                state.curriculumMinDist      = minDist;
+                state.curriculumMaxDist      = maxDist;
+                state.curriculumNumObstacles = numObstacles;
 
                 double spawnX, spawnZ, spawnY;
                 float  spawnYaw;
@@ -91,7 +110,6 @@ public class EnvironmentManager {
                     spawnZ   = (rng.nextDouble() - 0.5) * 2.0;
                     spawnY   = resolveStandY(level, spawnX, spawnZ);
                     spawnYaw = (float) (rng.nextDouble() * 360.0 - 180.0);
-                    // Place 1-block wall obstacles on the direct path
                     placeNavigationObstacles(level, spawnX, spawnZ);
                 }
 
@@ -101,7 +119,7 @@ public class EnvironmentManager {
                 double initDist = distanceToTarget(agent);
                 state.reset(initDist);
 
-                double[]          obs  = ObservationBuilder.build(agent, state);
+                double[]           obs  = ObservationBuilder.build(agent, state);
                 Map<String,Object> info = buildInfo(false, initDist, taskProgress(agent));
                 future.complete(jsonResponse(obs, 0.0, false, false, info));
 
@@ -122,9 +140,6 @@ public class EnvironmentManager {
     // step()
     // ------------------------------------------------------------------
 
-    /**
-     * Executes one environment step on the main server thread.
-     */
     public synchronized String step(int action) {
         ServerPlayer observer = getObserverPlayer();
         if (observer == null) return errorJson("No player found. Open a singleplayer world first.");
@@ -136,7 +151,6 @@ public class EnvironmentManager {
                 ServerLevel level = observer.serverLevel();
                 RLNpcEntity agent = getOrCreateAgent(level);
 
-                // If the episode is already over, just return the terminal obs
                 if (state.done) {
                     double cd = distanceToTarget(agent);
                     future.complete(jsonResponse(
@@ -170,14 +184,13 @@ public class EnvironmentManager {
 
                 state.success = success;
                 state.done    = success || truncated;
-
                 if (!validAction) state.invalidActionCount++;
 
                 double reward = computeReward(
                         agent, action, beforeDistance, currentDistance, validAction, success);
                 state.prevDistance = currentDistance;
 
-                double[]          obs  = ObservationBuilder.build(agent, state);
+                double[]           obs  = ObservationBuilder.build(agent, state);
                 Map<String,Object> info = buildInfo(success, currentDistance, taskProgress(agent));
                 future.complete(jsonResponse(obs, reward, state.done, truncated, info));
 
@@ -199,37 +212,39 @@ public class EnvironmentManager {
     // ------------------------------------------------------------------
 
     private void configureNavigationTask(ServerLevel level) {
+        double minD = (state.curriculumMinDist > 0) ? state.curriculumMinDist : NAV_DEFAULT_MIN_DIST;
+        double maxD = (state.curriculumMaxDist > 0) ? state.curriculumMaxDist : NAV_DEFAULT_MAX_DIST;
+        if (maxD < minD) maxD = minD + 1.0;
+
         double angle  = rng.nextDouble() * 2.0 * Math.PI;
-        double dist   = 7.0 + rng.nextDouble() * 7.0;   // 7–14 blocks
+        double dist   = minD + rng.nextDouble() * (maxD - minD);
         state.targetX = Math.round(Math.cos(angle) * dist);
         state.targetZ = Math.round(Math.sin(angle) * dist);
         state.targetY = resolveGroundY(level, state.targetX, state.targetZ) + 1.0;
     }
 
-    /**
-     * Places 1–2 stone blocks (1 block high) along the direct line from the
-     * agent spawn (near origin) to the navigation target.  The obstacles are
-     * placed at ~35% and (optionally) ~65% of the way along that line so that
-     * the agent must learn to jump over them.
-     */
     private void placeNavigationObstacles(ServerLevel level, double spawnX, double spawnZ) {
-        int numObstacles = 1 + rng.nextInt(2); // 1 or 2
+        // Determine obstacle count: curriculum override or random 1–2
+        int count = (state.curriculumNumObstacles >= 0)
+                ? state.curriculumNumObstacles
+                : 1 + rng.nextInt(2);
+
+        if (count == 0) return;
 
         double dx   = state.targetX - spawnX;
         double dz   = state.targetZ - spawnZ;
         double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 4.0) return;
 
-        if (dist < 4.0) return; // too close to bother
-
-        double[] fractions = {0.35, 0.65};
-        for (int i = 0; i < numObstacles; i++) {
+        // Spread obstacles evenly along the path
+        double[] fractions = {0.35, 0.55, 0.70};
+        for (int i = 0; i < Math.min(count, fractions.length); i++) {
             double frac = fractions[i] + (rng.nextDouble() - 0.5) * 0.08;
-            int ox      = (int) Math.round(spawnX + dx * frac);
-            int oz      = (int) Math.round(spawnZ + dz * frac);
-            int groundY = getReferenceGroundY(level, ox, oz);
+            int    ox   = (int) Math.round(spawnX + dx * frac);
+            int    oz   = (int) Math.round(spawnZ + dz * frac);
+            int    gy   = getReferenceGroundY(level, ox, oz);
 
-            BlockPos wallPos = new BlockPos(ox, groundY + 1, oz);
-            // Avoid placing on top of the target marker or the agent spawn
+            BlockPos wallPos = new BlockPos(ox, gy + 1, oz);
             double wallDist = Math.sqrt(Math.pow(ox - state.targetX, 2) + Math.pow(oz - state.targetZ, 2));
             if (wallDist < 1.5) continue;
 
@@ -294,40 +309,39 @@ public class EnvironmentManager {
             double beforeDistance, double currentDistance,
             boolean validAction, boolean success) {
 
+        // ---- SPARSE MODE: only terminal signals ----
+        if (state.sparseReward) {
+            if (success)          return 10.0;
+            if (!validAction)     return -0.10;
+            if (state.stuckSteps >= STUCK_LIMIT) return -0.25;
+            return -0.01;   // tiny time penalty to break ties
+        }
+
+        // ---- SHAPED MODE (default) ----
         double reward   = 0.0;
         double progress = beforeDistance - currentDistance;
 
-        // Progress shaping: reward getting closer, penalise moving away
         reward += 0.15 * progress;
-
-        // Small time penalty to encourage efficiency
         reward -= 0.015;
 
         if ("farming".equals(state.taskName)) {
             boolean cropInFront = ObservationBuilder.isMatureCropInFront(agent);
             boolean nearTarget  = currentDistance <= 1.10;
 
-            if (nearTarget)   reward += 0.05;
-            if (cropInFront)  reward += 0.10;   // reduced from 0.25 to avoid camping
+            if (nearTarget)  reward += 0.05;
+            if (cropInFront) reward += 0.10;
 
-            // Penalise drifting away once close
             if (beforeDistance <= 1.15 && currentDistance > beforeDistance + 1e-6)
                 reward -= 0.10;
 
-            // Interact rewards
             if (action == 3 && cropInFront)  reward += 2.0;
             if (action == 3 && !cropInFront) reward -= 0.05;
             if (state.lastInteractValid)      reward += 4.0;
         }
 
-        // Jump bonus: encourage learning to use jump over obstacles
-        if (state.lastJumpedObstacle) reward += 0.5;
-
-        // Terminal bonus
-        if (success) reward += 10.0;
-
-        // Penalties
-        if (!validAction)              reward -= 0.10;
+        if (state.lastJumpedObstacle)        reward += 0.5;
+        if (success)                         reward += 10.0;
+        if (!validAction)                    reward -= 0.10;
         if (state.stuckSteps >= STUCK_LIMIT) reward -= 0.25;
 
         return reward;
@@ -403,7 +417,6 @@ public class EnvironmentManager {
             level.setBlockAndUpdate(state.farmingSoilPos, Blocks.GRASS_BLOCK.defaultBlockState());
             state.farmingSoilPos = null;
         }
-        // Clear navigation obstacles from the previous episode
         for (BlockPos pos : state.obstaclePositions) {
             level.setBlockAndUpdate(pos, Blocks.AIR.defaultBlockState());
         }
@@ -432,10 +445,10 @@ public class EnvironmentManager {
             markerPos = state.farmingCropPos.east();
             level.setBlockAndUpdate(markerPos, Blocks.EMERALD_BLOCK.defaultBlockState());
         } else {
-            int markerX  = (int) Math.floor(state.targetX);
-            int groundY  = (int) Math.floor(resolveGroundY(level, state.targetX, state.targetZ));
-            int markerZ  = (int) Math.floor(state.targetZ);
-            markerPos = new BlockPos(markerX, groundY + 1, markerZ);
+            int markerX = (int) Math.floor(state.targetX);
+            int groundY = (int) Math.floor(resolveGroundY(level, state.targetX, state.targetZ));
+            int markerZ = (int) Math.floor(state.targetZ);
+            markerPos   = new BlockPos(markerX, groundY + 1, markerZ);
             level.setBlockAndUpdate(markerPos, Blocks.GOLD_BLOCK.defaultBlockState());
         }
         state.markerPos = markerPos;
@@ -498,6 +511,7 @@ public class EnvironmentManager {
         info.put("stuck_steps",          state.stuckSteps);
         info.put("task_progress",        round(progress));
         info.put("invalid_action_count", state.invalidActionCount);
+        info.put("sparse_reward",        state.sparseReward);
         return info;
     }
 

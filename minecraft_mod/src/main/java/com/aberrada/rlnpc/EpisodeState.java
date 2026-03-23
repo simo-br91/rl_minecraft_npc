@@ -15,24 +15,34 @@ public class EpisodeState {
     public boolean done               = false;
     public boolean success            = false;
 
-    public String taskName = "navigation";
-    public double taskId   = 0.0;
+    public String  taskName    = "navigation";
+    public double  taskId      = 0.0;
 
-    public double targetX = 8.0;
-    public double targetY = 4.0;
-    public double targetZ = 0.0;
+    public double  targetX     = 8.0;
+    public double  targetY     = 4.0;
+    public double  targetZ     = 0.0;
 
-    public UUID    agentUuid       = null;
-    public BlockPos markerPos      = null;
-    public BlockPos farmingSoilPos = null;
-    public BlockPos farmingCropPos = null;
+    // ---- curriculum / experiment config (set on each reset) ----
+    /** When true, only terminal rewards are given (no distance shaping). */
+    public boolean sparseReward           = false;
+    /** Curriculum: minimum XZ distance to target. -1 = use task default. */
+    public double  curriculumMinDist      = -1.0;
+    /** Curriculum: maximum XZ distance to target. -1 = use task default. */
+    public double  curriculumMaxDist      = -1.0;
+    /** Curriculum: exact number of obstacles to place. -1 = use task default (1-2). */
+    public int     curriculumNumObstacles = -1;
+
+    public UUID     agentUuid       = null;
+    public BlockPos markerPos       = null;
+    public BlockPos farmingSoilPos  = null;
+    public BlockPos farmingCropPos  = null;
 
     /** Obstacle blocks placed for the current navigation episode. */
     public List<BlockPos> obstaclePositions = new ArrayList<>();
 
-    /** Set to true by ActionExecutor when the agent successfully jumps over a wall. */
-    public boolean lastInteractValid   = false;
-    public boolean lastJumpedObstacle  = false;
+    /** Per-step flags set by ActionExecutor / interact handler. */
+    public boolean lastInteractValid  = false;
+    public boolean lastJumpedObstacle = false;
 
     public void setTask(String task) {
         if ("farming".equalsIgnoreCase(task)) {
