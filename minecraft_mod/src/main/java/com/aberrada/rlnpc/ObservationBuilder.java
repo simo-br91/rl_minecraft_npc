@@ -26,7 +26,7 @@ import java.util.Locale;
  *   5    pitch_norm        (pitch / 90, in [-1, 1])
  *   6    blocked_front     (1 if solid block ahead at feet level)
  *   7    on_ground         (1 if solid block below)
- *   8    stuck_norm        (stuck_steps / 10, clamped [0,1])
+ *   8    stuck_norm        (stuck_steps / 15, clamped [0,1])  ← was /10
  *   9    task_id_norm      (task_id / 3.0)
  *  10    crop_in_front     (1 if mature crop directly ahead)
  *  11    near_crop         (1 if within 1.5 blocks of any unharvested crop)
@@ -40,18 +40,27 @@ import java.util.Locale;
  *  19    holding_sword     (1 if active slot is sword)
  *  20    holding_food      (1 if active slot is food)
  *  21    crops_remaining_norm  (remaining_crops / totalCrops)
- *  22    block_n           (1 if solid block 1 ahead at N)
- *  23    block_e           (1 if solid block 1 ahead at E)
- *  24    block_s           (1 if solid block 1 ahead at S)
- *  25    block_w           (1 if solid block 1 ahead at W)
- *  26    farmland_ahead    (1 if untilled soil directly ahead — for farming cycle)
- *  27    seed_in_inventory (1 if agent has seeds)
+ *  22    block_N           (1 if solid block 1.5 ahead at N)
+ *  23    block_E           (1 if solid block 1.5 ahead at E)
+ *  24    block_S           (1 if solid block 1.5 ahead at S)
+ *  25    block_W           (1 if solid block 1.5 ahead at W)
+ *  26    farmland_ahead    (1 if untilled soil directly ahead)
+ *  27    has_seed          (1 if agent has seeds — always true in simulation)
+ *
+ * Changes vs previous version
+ * ----------------------------
+ * stuck_norm now divides by 15 instead of 10.  The old divisor caused
+ * the feature to saturate at 1.0 when stuckSteps >= 10, making the policy
+ * blind to prolonged stuckness.  With /15 the signal remains informative
+ * up to 15 consecutive stuck steps before clamping.
  */
 public class ObservationBuilder {
 
-    public static final int OBS_DIM = 28;
+    public static final int OBS_DIM  = 28;
     private static final double MAX_DIST    = 30.0;
     private static final double MOB_RANGE   = 8.0;
+    // FIX: raised from 10.0 → 15.0 to avoid premature saturation
+    private static final double STUCK_DIVISOR = 15.0;
 
     public static double[] build(RLNpcEntity agent, EpisodeState state) {
         double dx   = state.targetX - agent.getX();
@@ -62,73 +71,72 @@ public class ObservationBuilder {
         double dzNorm   = Math.max(-1.0, Math.min(1.0, dz / MAX_DIST));
         double distNorm = Math.min(1.0, dist / MAX_DIST);
 
-        // Angle error: sin of difference between facing direction and target direction
         double angleToTarget = computeAngleToTarget(agent, dx, dz);
 
         double yawNorm   = normalizeYaw(agent.getYRot()) / 180.0;
         double pitchNorm = Math.max(-1.0, Math.min(1.0, agent.getXRot() / 90.0));
 
-        double blockedFront   = isBlockedFront(agent) ? 1.0 : 0.0;
-        double onGround       = isOnGround(agent) ? 1.0 : 0.0;
-        double stuckNorm      = Math.min(state.stuckSteps / 10.0, 1.0);
-        double taskIdNorm     = state.taskId / 3.0;
+        double blockedFront = isBlockedFront(agent) ? 1.0 : 0.0;
+        double onGround     = isOnGround(agent) ? 1.0 : 0.0;
+
+        // FIX: divide by STUCK_DIVISOR (15) instead of 10
+        double stuckNorm = Math.min(state.stuckSteps / STUCK_DIVISOR, 1.0);
+
+        double taskIdNorm = state.taskId / 3.0;
 
         double cropInFront = isMatureCropInFront(agent) ? 1.0 : 0.0;
         double nearCrop    = isNearUnharvestedCrop(agent, state) ? 1.0 : 0.0;
         double obstacle1   = is1BlockObstacleAhead(agent) ? 1.0 : 0.0;
 
-        double healthNorm  = Math.max(0.0, Math.min(1.0, state.health / 20.0));
-        double foodNorm    = Math.max(0.0, Math.min(1.0, state.foodLevel / 20.0));
+        double healthNorm = Math.max(0.0, Math.min(1.0, state.health / 20.0));
+        double foodNorm   = Math.max(0.0, Math.min(1.0, state.foodLevel / 20.0));
 
-        // Mob sensing
-        double[] mobInfo = getMobInfo(agent);
+        double[] mobInfo   = getMobInfo(agent);
         double mobNearby   = mobInfo[0];
         double mobDistNorm = mobInfo[1];
         double mobAngle    = mobInfo[2];
 
         double activeSlotNorm = state.activeSlot / 4.0;
         double holdingSword   = (state.activeSlot == EpisodeState.SLOT_SWORD) ? 1.0 : 0.0;
-        double holdingFood    = (state.activeSlot == EpisodeState.SLOT_FOOD) ? 1.0 : 0.0;
+        double holdingFood    = (state.activeSlot == EpisodeState.SLOT_FOOD)  ? 1.0 : 0.0;
 
         double cropsRemainingNorm = state.totalCrops > 0
                 ? (double)(state.totalCrops - state.cropsHarvested) / state.totalCrops
                 : 0.0;
 
-        // Cardinal direction blocks (mini voxel scan)
-        double[] cardinal = getCardinalBlocks(agent);
-
-        double farmlandAhead = isFarmlandAhead(agent) ? 1.0 : 0.0;
-        double hasSeed       = agentHasSeeds(agent, state) ? 1.0 : 0.0;
+        double[] cardinal      = getCardinalBlocks(agent);
+        double farmlandAhead   = isFarmlandAhead(agent) ? 1.0 : 0.0;
+        double hasSeed         = 1.0;  // agent always has seeds in simulation
 
         return new double[] {
-            dxNorm,            // 0
-            dzNorm,            // 1
-            distNorm,          // 2
-            angleToTarget,     // 3
-            yawNorm,           // 4
-            pitchNorm,         // 5
-            blockedFront,      // 6
-            onGround,          // 7
-            stuckNorm,         // 8
-            taskIdNorm,        // 9
-            cropInFront,       // 10
-            nearCrop,          // 11
-            obstacle1,         // 12
-            healthNorm,        // 13
-            foodNorm,          // 14
-            mobNearby,         // 15
-            mobDistNorm,       // 16
-            mobAngle,          // 17
-            activeSlotNorm,    // 18
-            holdingSword,      // 19
-            holdingFood,       // 20
-            cropsRemainingNorm,// 21
-            cardinal[0],       // 22 N
-            cardinal[1],       // 23 E
-            cardinal[2],       // 24 S
-            cardinal[3],       // 25 W
-            farmlandAhead,     // 26
-            hasSeed,           // 27
+            dxNorm,             //  0
+            dzNorm,             //  1
+            distNorm,           //  2
+            angleToTarget,      //  3
+            yawNorm,            //  4
+            pitchNorm,          //  5
+            blockedFront,       //  6
+            onGround,           //  7
+            stuckNorm,          //  8  ← fixed divisor
+            taskIdNorm,         //  9
+            cropInFront,        // 10
+            nearCrop,           // 11
+            obstacle1,          // 12
+            healthNorm,         // 13
+            foodNorm,           // 14
+            mobNearby,          // 15
+            mobDistNorm,        // 16
+            mobAngle,           // 17
+            activeSlotNorm,     // 18
+            holdingSword,       // 19
+            holdingFood,        // 20
+            cropsRemainingNorm, // 21
+            cardinal[0],        // 22  N
+            cardinal[1],        // 23  E
+            cardinal[2],        // 24  S
+            cardinal[3],        // 25  W
+            farmlandAhead,      // 26
+            hasSeed,            // 27
         };
     }
 
@@ -142,7 +150,6 @@ public class ObservationBuilder {
         if (flat == null) return 0.0;
         double targetLen = Math.sqrt(dx * dx + dz * dz);
         double tdx = dx / targetLen, tdz = dz / targetLen;
-        // sin of cross product (signed angle error)
         return flat.x * tdz - flat.z * tdx;
     }
 
@@ -153,7 +160,7 @@ public class ObservationBuilder {
     private static double normalizeYaw(float yaw) {
         double r = yaw;
         while (r <= -180.0) r += 360.0;
-        while (r > 180.0)   r -= 360.0;
+        while (r >   180.0) r -= 360.0;
         return r;
     }
 
@@ -182,18 +189,15 @@ public class ObservationBuilder {
         return low && !high;
     }
 
-    /** Sample blocks in 4 cardinal directions for a mini voxel sense. */
     private static double[] getCardinalBlocks(RLNpcEntity agent) {
         double x = agent.getX(), y = agent.getY(), z = agent.getZ();
-        double[] dirs = {0, -1,  // N (−z)
-                         1,  0,  // E (+x)
-                         0,  1,  // S (+z)
-                        -1,  0}; // W (−x)
+        // N(−z), E(+x), S(+z), W(−x)
+        double[] dirs = {0, -1,  1, 0,  0, 1,  -1, 0};
         double[] result = new double[4];
         for (int i = 0; i < 4; i++) {
-            double dx = dirs[i * 2], dz = dirs[i * 2 + 1];
-            double tx = x + dx * 1.5, tz = z + dz * 1.5;
-            result[i] = ActionExecutor.isBlockedAt(agent, tx, y, tz) ? 1.0 : 0.0;
+            double ddx = dirs[i * 2], ddz = dirs[i * 2 + 1];
+            result[i] = ActionExecutor.isBlockedAt(agent,
+                    x + ddx * 1.5, y, z + ddz * 1.5) ? 1.0 : 0.0;
         }
         return result;
     }
@@ -202,7 +206,6 @@ public class ObservationBuilder {
         BlockPos front = ActionExecutor.frontBlockPos(agent);
         BlockPos below = front.below();
         BlockState b = agent.level().getBlockState(below);
-        // Grass or dirt = tillable; Farmland = already tilled
         return b.getBlock() instanceof GrassBlock
             || b.getBlock().getClass().getSimpleName().contains("Dirt");
     }
@@ -214,7 +217,8 @@ public class ObservationBuilder {
     public static BlockPos frontCropPos(RLNpcEntity agent) {
         Vec3 flat = ActionExecutor.getHorizontalLook(agent);
         if (flat == null) flat = new Vec3(0, 0, 1);
-        Vec3 origin = agent.position().add(0.0, 0.3, 0.0);
+        // Use the same Y offset as frontBlockPos for consistency
+        Vec3 origin = agent.position().add(0.0, 0.2, 0.0);
         Vec3 front  = origin.add(flat.scale(0.9));
         return BlockPos.containing(front.x, origin.y, front.z);
     }
@@ -236,16 +240,10 @@ public class ObservationBuilder {
         return false;
     }
 
-    private static boolean agentHasSeeds(RLNpcEntity agent, EpisodeState state) {
-        // In our simulation, seeds are always tracked in state
-        return true;  // agent always has seeds in full farming cycle
-    }
-
     // ------------------------------------------------------------------
     // Mob sensing
     // ------------------------------------------------------------------
 
-    /** Returns [nearby(0/1), distNorm, sinAngle]. */
     private static double[] getMobInfo(RLNpcEntity agent) {
         AABB box = agent.getBoundingBox().inflate(MOB_RANGE);
         List<Monster> mobs = agent.level().getEntitiesOfClass(

@@ -1,78 +1,59 @@
 """
 evaluate_farming.py
 -------------------
-Runs a trained farming model for N deterministic episodes.
+Deterministic rollout for the farming task.
 
 Usage
 -----
     python -m python_rl.eval.evaluate_farming
     python -m python_rl.eval.evaluate_farming --model farm_run1 --episodes 10
+    python -m python_rl.eval.evaluate_farming --crops 5 --full-cycle
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-
-from stable_baselines3 import PPO
 
 from python_rl.env.minecraft_env import MinecraftEnv
-
-CHECKPOINTS_DIR = Path("python_rl/checkpoints")
-
-
-def run_episode(model: PPO, env: MinecraftEnv, *, verbose: bool = True) -> dict:
-    obs, _ = env.reset(options={"task": "farming"})
-    done = truncated = False
-    total_reward = 0.0
-    steps = 0
-
-    while not done and not truncated:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, done, truncated, info = env.step(action)
-        total_reward += reward
-        steps += 1
-        if verbose:
-            print(
-                f"  step={steps:3d}  action={int(action)}  reward={reward:+.3f}  "
-                f"dist={info.get('distance_to_target', '?'):.2f}  "
-                f"progress={info.get('task_progress', 0):.2f}  "
-                f"done={done}  trunc={truncated}"
-            )
-
-    return {
-        "success":      info.get("success", False),
-        "steps":        steps,
-        "total_reward": round(total_reward, 3),
-    }
+from python_rl.eval.eval_utils import load_model, run_episodes
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a farming model.")
-    parser.add_argument("--model",    default="farm_run1")
-    parser.add_argument("--episodes", type=int, default=5)
+    parser.add_argument("--model",      default="farm_run1")
+    parser.add_argument("--episodes",   type=int, default=5)
+    parser.add_argument("--crops",      type=int, default=5,
+                        help="Number of wheat plots per episode.")
+    parser.add_argument("--full-cycle", action="store_true",
+                        help="Use seeds→bonemeal→harvest cycle instead of pre-grown.")
+    parser.add_argument("--quiet",      action="store_true")
     args = parser.parse_args()
 
-    model_path = CHECKPOINTS_DIR / args.model
-    if not model_path.with_suffix(".zip").exists():
-        raise FileNotFoundError(f"Checkpoint not found: {model_path}.zip")
+    model = load_model(args.model)
+    env   = MinecraftEnv(task="farming",
+                         num_crops=args.crops,
+                         full_farm_cycle=args.full_cycle)
 
-    model = PPO.load(str(model_path))
-    env   = MinecraftEnv(task="farming")
+    reset_opts = {
+        "num_crops":      args.crops,
+        "full_farm_cycle": args.full_cycle,
+    }
 
-    successes = 0
-    for ep in range(1, args.episodes + 1):
-        print(f"\n--- Episode {ep} ---")
-        stats = run_episode(model, env, verbose=True)
-        successes += int(stats["success"])
-        print(
-            f"  → success={stats['success']}  steps={stats['steps']}  "
-            f"total_reward={stats['total_reward']}"
-        )
-
+    summary = run_episodes(model, env, "farming",
+                           args.episodes,
+                           reset_options=reset_opts,
+                           verbose=not args.quiet)
     env.close()
-    print(f"\nSummary: {successes}/{args.episodes} successes "
-          f"({successes/args.episodes:.0%})")
+
+    print(f"\n{'='*60}")
+    print(f"Model      : {args.model}")
+    print(f"Crops/ep   : {args.crops}  full_cycle={args.full_cycle}")
+    print(f"Episodes   : {summary['episodes']}")
+    print(f"Success    : {summary['success_rate']:.0%}")
+    print(f"Avg reward : {summary['avg_reward']:+.2f}")
+    print(f"Avg steps  : {summary['avg_steps']:.0f}")
+    print(f"Avg crops  : {summary['avg_crops']:.1f}/{args.crops}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

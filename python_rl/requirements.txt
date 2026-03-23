@@ -1,0 +1,26 @@
+# Core RL
+stable-baselines3>=2.3.0
+sb3-contrib>=2.3.0          # MaskablePPO lives here
+
+# Environment / gym
+gymnasium>=0.29.0
+
+# Deep learning backend
+torch>=2.1.0
+
+# Monitoring & logging
+tensorboard>=2.14.0
+
+# Networking (bridge)
+requests>=2.31.0
+
+# Data / plotting
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+
+# Config files
+pyyaml>=6.0.1
+
+# Dev / optional
+pytest>=7.4.0
