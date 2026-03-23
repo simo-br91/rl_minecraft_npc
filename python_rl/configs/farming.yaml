@@ -1,34 +1,19 @@
-# ---------------------------------------------------------------
-# Experiment: Single-task farming  (harvest mature wheat crop)
-# ---------------------------------------------------------------
 experiment_name: farming
-
-# Task
 task: farming
 reward_type: shaped
-
-# Curriculum
 curriculum: false
-
-# Episode budget
-# Farming requires a longer budget than navigation:
-# the agent must learn (a) navigate to the crop AND (b) use interact.
-total_timesteps: 300000
-
-# PPO hyperparameters
-# Slightly lower LR because the farming reward signal is spiky
-# (a large bonus only fires when interact succeeds near a mature crop).
+num_crops: 5
+full_farm_cycle: false
+total_timesteps: 400000
 n_steps: 2048
 batch_size: 256
 n_epochs: 10
-learning_rate: 2.0e-4      # ↓ vs navigation: spiky reward
+learning_rate: 2.0e-4
 gamma: 0.99
 gae_lambda: 0.95
-ent_coef: 0.04
+ent_coef: 0.05
 clip_range: 0.2
 net_arch: [256, 256]
-
-# Output paths
 checkpoint_name: farm_run1
 monitor_log: farm_monitor.csv
 success_log: farm_success.csv

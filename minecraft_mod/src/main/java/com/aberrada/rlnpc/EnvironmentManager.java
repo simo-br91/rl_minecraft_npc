@@ -5,11 +5,16 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.Difficulty;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.MobSpawnType;
+import net.minecraft.world.entity.monster.Skeleton;
+import net.minecraft.world.entity.monster.Zombie;
+import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.levelgen.Heightmap;
 
 import java.util.HashMap;
 import java.util.List;
@@ -20,29 +25,35 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Central coordinator for RL environment episodes.
+ *
+ * Responsibilities:
+ *  - Episode lifecycle (reset / step)
+ *  - Agent creation and inventory setup
+ *  - Delegating to TaskSetup, RewardCalculator, ObservationBuilder
+ *  - HTTP JSON serialization
+ *  - Night/day control, mob spawning
+ *
+ * Intentionally kept lean — most logic lives in helper classes.
+ */
 public class EnvironmentManager {
 
     // ------------------------------------------------------------------
-    // Constants
+    // Episode constants
     // ------------------------------------------------------------------
-
-    private static final double NAV_SUCCESS_DISTANCE  = 1.5;
-    private static final double FARM_SUCCESS_DISTANCE = 1.05;
-    private static final double STUCK_EPS             = 0.01;
-    private static final int    STUCK_LIMIT           = 8;
-    private static final double MAX_EPISODE_DISTANCE  = 30.0;
-
-    // Navigation defaults (used when no curriculum override is given)
-    private static final double NAV_DEFAULT_MIN_DIST = 7.0;
-    private static final double NAV_DEFAULT_MAX_DIST = 14.0;
-
-    private static final int FARM_X = 6;
-    private static final int FARM_Z = 2;
+    private static final double NAV_SUCCESS_DIST   = 1.5;
+    private static final double FARM_SUCCESS_DIST  = 1.05;
+    private static final double STUCK_EPS          = 0.01;
+    private static final int    STUCK_LIMIT        = 8;
+    private static final double MAX_EPISODE_DIST   = 35.0;
+    private static final double COMBAT_CLEAR_DIST  = 12.0;
+    private static final int    DEFAULT_CROP_COUNT = 5;
+    private static final int    MOB_COUNT_PER_EP   = 3;
 
     // ------------------------------------------------------------------
     // Fields
     // ------------------------------------------------------------------
-
     private final MinecraftServer server;
     private final EpisodeState    state;
     private final Random          rng = new Random();
@@ -50,90 +61,109 @@ public class EnvironmentManager {
     public EnvironmentManager(MinecraftServer server) {
         this.server = server;
         this.state  = new EpisodeState();
+        // Apply world settings once server is available
+        server.execute(this::applyWorldSettings);
     }
 
     // ------------------------------------------------------------------
     // reset()
     // ------------------------------------------------------------------
 
-    /**
-     * Resets the environment for a new episode.
-     *
-     * @param taskName        "navigation" or "farming"
-     * @param sparseReward    true  → only terminal reward (+10 success / tiny step penalty)
-     *                        false → full shaped reward (default)
-     * @param minDist         minimum XZ distance to target; pass -1 for task default
-     * @param maxDist         maximum XZ distance to target; pass -1 for task default
-     * @param numObstacles    number of 1-block wall obstacles; pass -1 for random 1–2
-     */
     public synchronized String reset(String taskName,
                                      boolean sparseReward,
                                      double  minDist,
                                      double  maxDist,
-                                     int     numObstacles) {
-
+                                     int     numObstacles,
+                                     int     numCrops,
+                                     boolean fullFarmingCycle) {
         ServerPlayer observer = getObserverPlayer();
         if (observer == null) return errorJson("No player found. Open a singleplayer world first.");
 
         CompletableFuture<String> future = new CompletableFuture<>();
-
         server.execute(() -> {
             try {
                 ServerLevel level = observer.serverLevel();
+                applyWorldSettings();
 
-                // Clear artifacts from the previous episode
-                if ("farming".equals(state.taskName) && state.farmingSoilPos != null) {
-                    clearFarmArea(level, state.farmingSoilPos.getX(), state.farmingSoilPos.getZ());
-                }
-                clearTaskArtifacts(level);
+                // Clean previous episode
+                TaskSetup.clearTaskArtifacts(level, state);
+                despawnEpisodeMobs(level);
 
-                // Configure task & store experiment-level flags in state
+                // Configure task
                 state.setTask(taskName);
                 state.sparseReward           = sparseReward;
                 state.curriculumMinDist      = minDist;
                 state.curriculumMaxDist      = maxDist;
                 state.curriculumNumObstacles = numObstacles;
 
-                double spawnX, spawnZ, spawnY;
-                float  spawnYaw;
+                // Create / locate agent
                 RLNpcEntity agent = getOrCreateAgent(level);
+                InventoryManager.equipAgent(agent, state);
 
-                if ("farming".equals(state.taskName)) {
-                    configureFarmingTask(level);
-                    spawnX   = state.targetX + (rng.nextDouble() - 0.5) * 6.0;
-                    spawnZ   = state.targetZ + (rng.nextDouble() - 0.5) * 6.0;
-                    spawnY   = resolveStandY(level, spawnX, spawnZ);
-                    spawnYaw = (float) (rng.nextDouble() * 360.0 - 180.0);
-                } else {
-                    configureNavigationTask(level);
-                    spawnX   = (rng.nextDouble() - 0.5) * 2.0;
-                    spawnZ   = (rng.nextDouble() - 0.5) * 2.0;
-                    spawnY   = resolveStandY(level, spawnX, spawnZ);
-                    spawnYaw = (float) (rng.nextDouble() * 360.0 - 180.0);
-                    placeNavigationObstacles(level, spawnX, spawnZ);
+                // Task-specific setup
+                double spawnX, spawnZ, spawnY;
+                float  spawnYaw = (float)(rng.nextDouble() * 360.0 - 180.0);
+
+                switch (state.taskName) {
+                    case "farming" -> {
+                        int nc = numCrops > 0 ? numCrops : DEFAULT_CROP_COUNT;
+                        TaskSetup.configureFarming(level, state, nc, fullFarmingCycle, rng);
+                        spawnX = state.targetX + (rng.nextDouble() - 0.5) * 8.0;
+                        spawnZ = state.targetZ + (rng.nextDouble() - 0.5) * 8.0;
+                        spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
+                        // No navigation marker for farming
+                    }
+                    case "combat" -> {
+                        TaskSetup.configureNavigation(level, state, rng);
+                        spawnX = (rng.nextDouble() - 0.5) * 2.0;
+                        spawnZ = (rng.nextDouble() - 0.5) * 2.0;
+                        spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
+                        TaskSetup.placeNavigationMarker(level, state);
+                        spawnCombatMobs(level, spawnX, spawnZ, MOB_COUNT_PER_EP);
+                    }
+                    case "multitask" -> {
+                        // Set up both navigation target, crops, and mobs
+                        TaskSetup.configureNavigation(level, state, rng);
+                        int nc = numCrops > 0 ? numCrops : DEFAULT_CROP_COUNT;
+                        TaskSetup.configureFarming(level, state, nc, fullFarmingCycle, rng);
+                        // Override navigation target after farming (nearest crop)
+                        state.updateActiveCrop(0, 0);
+                        spawnX = (rng.nextDouble() - 0.5) * 3.0;
+                        spawnZ = (rng.nextDouble() - 0.5) * 3.0;
+                        spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
+                        TaskSetup.placeNavigationMarker(level, state);
+                        spawnCombatMobs(level, spawnX, spawnZ, 2);
+                    }
+                    default -> {   // navigation
+                        TaskSetup.configureNavigation(level, state, rng);
+                        spawnX = (rng.nextDouble() - 0.5) * 2.0;
+                        spawnZ = (rng.nextDouble() - 0.5) * 2.0;
+                        spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
+                        TaskSetup.placeNavigationObstacles(level, state, spawnX, spawnZ, rng);
+                        TaskSetup.placeNavigationMarker(level, state);
+                    }
                 }
 
                 placeAgent(agent, spawnX, spawnY, spawnZ, spawnYaw);
-                placeMarker(level);
 
-                double initDist = distanceToTarget(agent);
+                // Set natural pitch toward target
+                state.targetPitch = computeNaturalPitch(agent, state);
+                state.currentPitch = state.targetPitch;
+
+                double initDist = distanceToCurrentTarget(agent);
                 state.reset(initDist);
 
-                double[]           obs  = ObservationBuilder.build(agent, state);
-                Map<String,Object> info = buildInfo(false, initDist, taskProgress(agent));
+                double[]          obs  = ObservationBuilder.build(agent, state);
+                Map<String,Object> info = buildInfo(false, initDist, 0.0);
                 future.complete(jsonResponse(obs, 0.0, false, false, info));
-
             } catch (Exception e) {
                 RLNpcMod.LOGGER.error("reset() error", e);
-                future.completeExceptionally(e);
+                future.complete(errorJson("Reset error: " + e.getMessage()));
             }
         });
 
-        try {
-            return future.get(10, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            return errorJson("Reset timed out: " + e.getMessage());
-        }
+        try { return future.get(12, TimeUnit.SECONDS); }
+        catch (Exception e) { return errorJson("Reset timed out: " + e.getMessage()); }
     }
 
     // ------------------------------------------------------------------
@@ -142,222 +172,318 @@ public class EnvironmentManager {
 
     public synchronized String step(int action) {
         ServerPlayer observer = getObserverPlayer();
-        if (observer == null) return errorJson("No player found. Open a singleplayer world first.");
+        if (observer == null) return errorJson("No player found.");
 
         CompletableFuture<String> future = new CompletableFuture<>();
-
         server.execute(() -> {
             try {
                 ServerLevel level = observer.serverLevel();
                 RLNpcEntity agent = getOrCreateAgent(level);
 
                 if (state.done) {
-                    double cd = distanceToTarget(agent);
-                    future.complete(jsonResponse(
-                            ObservationBuilder.build(agent, state),
-                            0.0, true, false,
-                            buildInfo(state.success, cd, taskProgress(agent))));
+                    double cd = distanceToCurrentTarget(agent);
+                    future.complete(jsonResponse(ObservationBuilder.build(agent, state),
+                            0.0, true, false, buildInfo(state.success, cd, taskProgress(agent))));
                     return;
                 }
 
-                double beforeDistance = distanceToTarget(agent);
+                double beforeDist = distanceToCurrentTarget(agent);
                 state.lastInteractValid  = false;
                 state.lastJumpedObstacle = false;
+                state.lastAttackValid    = false;
+                state.lastEatValid       = false;
+                state.lastSprinting      = false;
+                state.mobsKilled         = 0;
+                state.timesHit           = 0;
+
+                // Handle health/food tick
+                updateHealthAndFood(agent);
 
                 boolean validAction;
                 if (action == 3) {
                     validAction = handleInteract(level, agent);
+                } else if (action == 10) {
+                    validAction = ActionExecutor.attack(agent, state);
+                } else if (action == 11) {
+                    validAction = InventoryManager.eatFood(agent, state);
+                } else if (action == 12) {
+                    validAction = handleSwitchItem(agent);
                 } else {
-                    validAction = ActionExecutor.applyMovementAction(agent, action, state);
+                    validAction = ActionExecutor.applyAction(agent, action, state);
                 }
 
-                double currentDistance = distanceToTarget(agent);
-                double delta           = beforeDistance - currentDistance;
+                // Update pitch toward natural angle
+                state.targetPitch = computeNaturalPitch(agent, state);
+                ActionExecutor.updatePitch(agent, state);
+
+                double afterDist = distanceToCurrentTarget(agent);
+                double delta     = beforeDist - afterDist;
                 state.episodeStep++;
 
                 if (Math.abs(delta) < STUCK_EPS) state.stuckSteps++;
                 else                              state.stuckSteps = 0;
 
+                // Compute success
                 boolean success   = computeSuccess(level, agent);
                 boolean truncated = state.episodeStep >= state.maxSteps
-                                 || distanceToTarget(agent) > MAX_EPISODE_DISTANCE;
+                                 || distanceToCurrentTarget(agent) > MAX_EPISODE_DIST
+                                 || state.isDead;
 
                 state.success = success;
                 state.done    = success || truncated;
                 if (!validAction) state.invalidActionCount++;
 
-                double reward = computeReward(
-                        agent, action, beforeDistance, currentDistance, validAction, success);
-                state.prevDistance = currentDistance;
+                // Sync state health from entity
+                state.health    = agent.getHealth();
+                state.isDead    = !agent.isAlive() || agent.getHealth() <= 0;
 
-                double[]           obs  = ObservationBuilder.build(agent, state);
-                Map<String,Object> info = buildInfo(success, currentDistance, taskProgress(agent));
+                // Farming: update active crop if current harvested
+                if ("farming".equals(state.taskName) || "multitask".equals(state.taskName)) {
+                    state.updateActiveCrop(agent.getX(), agent.getZ());
+                }
+
+                boolean cropInFront = ObservationBuilder.isMatureCropInFront(agent);
+                double reward = RewardCalculator.compute(
+                        agent, state, action, beforeDist, afterDist,
+                        validAction, success, cropInFront);
+                state.prevDistance = afterDist;
+
+                double[]          obs  = ObservationBuilder.build(agent, state);
+                Map<String,Object> info = buildInfo(success, afterDist, taskProgress(agent));
                 future.complete(jsonResponse(obs, reward, state.done, truncated, info));
 
             } catch (Exception e) {
                 RLNpcMod.LOGGER.error("step() error", e);
-                future.completeExceptionally(e);
+                future.complete(errorJson("Step error: " + e.getMessage()));
             }
         });
 
-        try {
-            return future.get(5, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            return errorJson("Step timed out: " + e.getMessage());
-        }
+        try { return future.get(6, TimeUnit.SECONDS); }
+        catch (Exception e) { return errorJson("Step timed out: " + e.getMessage()); }
     }
 
     // ------------------------------------------------------------------
-    // Task configuration
-    // ------------------------------------------------------------------
-
-    private void configureNavigationTask(ServerLevel level) {
-        double minD = (state.curriculumMinDist > 0) ? state.curriculumMinDist : NAV_DEFAULT_MIN_DIST;
-        double maxD = (state.curriculumMaxDist > 0) ? state.curriculumMaxDist : NAV_DEFAULT_MAX_DIST;
-        if (maxD < minD) maxD = minD + 1.0;
-
-        double angle  = rng.nextDouble() * 2.0 * Math.PI;
-        double dist   = minD + rng.nextDouble() * (maxD - minD);
-        state.targetX = Math.round(Math.cos(angle) * dist);
-        state.targetZ = Math.round(Math.sin(angle) * dist);
-        state.targetY = resolveGroundY(level, state.targetX, state.targetZ) + 1.0;
-    }
-
-    private void placeNavigationObstacles(ServerLevel level, double spawnX, double spawnZ) {
-        // Determine obstacle count: curriculum override or random 1–2
-        int count = (state.curriculumNumObstacles >= 0)
-                ? state.curriculumNumObstacles
-                : 1 + rng.nextInt(2);
-
-        if (count == 0) return;
-
-        double dx   = state.targetX - spawnX;
-        double dz   = state.targetZ - spawnZ;
-        double dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist < 4.0) return;
-
-        // Spread obstacles evenly along the path
-        double[] fractions = {0.35, 0.55, 0.70};
-        for (int i = 0; i < Math.min(count, fractions.length); i++) {
-            double frac = fractions[i] + (rng.nextDouble() - 0.5) * 0.08;
-            int    ox   = (int) Math.round(spawnX + dx * frac);
-            int    oz   = (int) Math.round(spawnZ + dz * frac);
-            int    gy   = getReferenceGroundY(level, ox, oz);
-
-            BlockPos wallPos = new BlockPos(ox, gy + 1, oz);
-            double wallDist = Math.sqrt(Math.pow(ox - state.targetX, 2) + Math.pow(oz - state.targetZ, 2));
-            if (wallDist < 1.5) continue;
-
-            level.setBlockAndUpdate(wallPos, Blocks.STONE.defaultBlockState());
-            state.obstaclePositions.add(wallPos);
-        }
-    }
-
-    private void configureFarmingTask(ServerLevel level) {
-        int farmX   = FARM_X + rng.nextInt(7) - 3;
-        int farmZ   = FARM_Z + rng.nextInt(7) - 3;
-        int groundY = getReferenceGroundY(level, farmX, farmZ);
-
-        BlockPos soilPos = new BlockPos(farmX, groundY, farmZ);
-        BlockPos cropPos = soilPos.above();
-
-        level.setBlockAndUpdate(soilPos, Blocks.FARMLAND.defaultBlockState());
-        CropBlock wheat = (CropBlock) Blocks.WHEAT;
-        level.setBlockAndUpdate(cropPos, wheat.getStateForAge(wheat.getMaxAge()));
-
-        state.targetX        = farmX - 0.5;
-        state.targetY        = cropPos.getY();
-        state.targetZ        = farmZ + 0.5;
-        state.farmingSoilPos = soilPos;
-        state.farmingCropPos = cropPos;
-    }
-
-    // ------------------------------------------------------------------
-    // Interact (farming harvest)
+    // Interact handler (farming + bonemeal + tilling)
     // ------------------------------------------------------------------
 
     private boolean handleInteract(ServerLevel level, RLNpcEntity agent) {
-        if (!"farming".equals(state.taskName)) return false;
+        if (!"farming".equals(state.taskName) && !"multitask".equals(state.taskName)) return false;
 
-        BlockPos   frontPos = ObservationBuilder.frontCropPos(agent);
-        BlockState block    = level.getBlockState(frontPos);
+        // Try to harvest mature crop in front
+        BlockPos frontPos = ObservationBuilder.frontCropPos(agent);
+        BlockState block  = level.getBlockState(frontPos);
 
         if (block.getBlock() instanceof CropBlock cropBlock && cropBlock.isMaxAge(block)) {
-            server.execute(() -> level.destroyBlock(frontPos, true, agent));
+            // Harvest
+            level.destroyBlock(frontPos, true, agent);
+            // Mark this crop as harvested
+            markCropHarvested(frontPos);
             state.lastInteractValid = true;
+            // Replant if full farming cycle
+            if (state.fullFarmingCycle) {
+                // Find matching soil
+                BlockPos soilPos = frontPos.below();
+                if (level.getBlockState(soilPos).getBlock() instanceof net.minecraft.world.level.block.FarmBlock) {
+                    CropBlock wheat = (CropBlock) Blocks.WHEAT;
+                    level.setBlockAndUpdate(frontPos, wheat.getStateForAge(0));
+                    // Re-add to tracking
+                    updateCropAfterReplant(frontPos);
+                }
+            }
             return true;
         }
+
+        // Try bonemeal on non-mature crop
+        if (state.fullFarmingCycle && block.getBlock() instanceof CropBlock cb && !cb.isMaxAge(block)) {
+            if (InventoryManager.hasBonemeal(agent) && InventoryManager.consumeBonemeal(agent)) {
+                int idx = getCropIndexForPos(frontPos);
+                if (idx >= 0) TaskSetup.applyBonemeal(level, state, idx);
+                return true;
+            }
+        }
+
         return false;
     }
 
+    private void markCropHarvested(BlockPos cropPos) {
+        for (int i = 0; i < state.farmingCropPositions.size(); i++) {
+            if (state.farmingCropPositions.get(i).equals(cropPos)) {
+                if (i < state.cropHarvested.size()) {
+                    state.cropHarvested.set(i, true);
+                    state.cropsHarvested++;
+                }
+                return;
+            }
+        }
+    }
+
+    private int getCropIndexForPos(BlockPos pos) {
+        for (int i = 0; i < state.farmingCropPositions.size(); i++) {
+            if (state.farmingCropPositions.get(i).equals(pos)) return i;
+        }
+        return -1;
+    }
+
+    private void updateCropAfterReplant(BlockPos pos) {
+        // Update growth stage tracking
+        int idx = getCropIndexForPos(pos);
+        if (idx >= 0 && idx < state.cropGrowthStages.size()) {
+            state.cropGrowthStages.set(idx, 0);
+            state.cropHarvested.set(idx, false);
+            state.cropsHarvested = Math.max(0, state.cropsHarvested - 1);
+        }
+    }
+
     // ------------------------------------------------------------------
-    // Success / reward
+    // Inventory switch
+    // ------------------------------------------------------------------
+
+    private boolean handleSwitchItem(RLNpcEntity agent) {
+        state.activeSlot = (state.activeSlot + 1) % 5;
+        InventoryManager.syncMainHandFromSlot(agent, state);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Health and food simulation
+    // ------------------------------------------------------------------
+
+    private void updateHealthAndFood(RLNpcEntity agent) {
+        // Sync real health from entity
+        state.health = agent.getHealth();
+
+        // Natural food regeneration (simplified)
+        if (state.foodLevel >= 18 && agent.getHealth() < agent.getMaxHealth()) {
+            // Natural regen
+        }
+        // Sprinting costs food
+        if (state.lastSprinting && state.foodLevel > 0) {
+            state.foodLevel = Math.max(0, state.foodLevel - 1);
+        }
+        // Starvation
+        if (state.foodLevel == 0 && agent.getHealth() > 1.0f) {
+            agent.hurt(agent.damageSources().starve(), 0.5f);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Combat mob spawning
+    // ------------------------------------------------------------------
+
+    private void spawnCombatMobs(ServerLevel level, double cx, double cz, int count) {
+        state.hostileMobUuids.clear();
+        for (int i = 0; i < count; i++) {
+            double angle = rng.nextDouble() * 2 * Math.PI;
+            double dist  = 6.0 + rng.nextDouble() * 4.0;
+            double mx = cx + Math.cos(angle) * dist;
+            double mz = cz + Math.sin(angle) * dist;
+            double my = TaskSetup.resolveStandY(level, mx, mz);
+
+            // Alternate zombies and skeletons
+            net.minecraft.world.entity.monster.Monster mob;
+            if (i % 2 == 0) {
+                mob = new Zombie(level);
+            } else {
+                mob = new Skeleton(level);
+            }
+            mob.moveTo(mx, my, mz, (float)(rng.nextDouble() * 360), 0);
+            mob.finalizeSpawn(level, level.getCurrentDifficultyAt(BlockPos.containing(mx, my, mz)),
+                    MobSpawnType.MOB_SUMMONED, null, null);
+            level.addFreshEntity(mob);
+            state.hostileMobUuids.add(mob.getUUID());
+
+            // Register listener for when mob is hurt by our agent
+            RLNpcMod.LOGGER.debug("Spawned mob {} at ({},{},{})", mob.getType().getDescriptionId(), mx, my, mz);
+        }
+    }
+
+    private void despawnEpisodeMobs(ServerLevel level) {
+        for (UUID uuid : state.hostileMobUuids) {
+            Entity e = level.getEntity(uuid);
+            if (e != null && e.isAlive()) e.remove(Entity.RemovalReason.DISCARDED);
+        }
+        state.hostileMobUuids.clear();
+    }
+
+    // ------------------------------------------------------------------
+    // Success computation
     // ------------------------------------------------------------------
 
     private boolean computeSuccess(ServerLevel level, RLNpcEntity agent) {
-        if ("farming".equals(state.taskName)) {
-            return state.lastInteractValid
-                && state.farmingCropPos != null
-                && distanceToTarget(agent) <= FARM_SUCCESS_DISTANCE
-                && level.getBlockState(state.farmingCropPos).isAir();
-        }
-        return distanceToTarget(agent) <= NAV_SUCCESS_DISTANCE;
-    }
-
-    private double computeReward(
-            RLNpcEntity agent, int action,
-            double beforeDistance, double currentDistance,
-            boolean validAction, boolean success) {
-
-        // ---- SPARSE MODE: only terminal signals ----
-        if (state.sparseReward) {
-            if (success)          return 10.0;
-            if (!validAction)     return -0.10;
-            if (state.stuckSteps >= STUCK_LIMIT) return -0.25;
-            return -0.01;   // tiny time penalty to break ties
-        }
-
-        // ---- SHAPED MODE (default) ----
-        double reward   = 0.0;
-        double progress = beforeDistance - currentDistance;
-
-        reward += 0.15 * progress;
-        reward -= 0.015;
-
-        if ("farming".equals(state.taskName)) {
-            boolean cropInFront = ObservationBuilder.isMatureCropInFront(agent);
-            boolean nearTarget  = currentDistance <= 1.10;
-
-            if (nearTarget)  reward += 0.05;
-            if (cropInFront) reward += 0.10;
-
-            if (beforeDistance <= 1.15 && currentDistance > beforeDistance + 1e-6)
-                reward -= 0.10;
-
-            if (action == 3 && cropInFront)  reward += 2.0;
-            if (action == 3 && !cropInFront) reward -= 0.05;
-            if (state.lastInteractValid)      reward += 4.0;
-        }
-
-        if (state.lastJumpedObstacle)        reward += 0.5;
-        if (success)                         reward += 10.0;
-        if (!validAction)                    reward -= 0.10;
-        if (state.stuckSteps >= STUCK_LIMIT) reward -= 0.25;
-
-        return reward;
+        return switch (state.taskName) {
+            case "farming"   -> state.allCropsHarvested();
+            case "combat"    -> state.hostileMobUuids.stream()
+                    .allMatch(uuid -> {
+                        Entity e = level.getEntity(uuid);
+                        return e == null || !e.isAlive();
+                    });
+            case "multitask" -> state.allCropsHarvested()
+                    && distanceToCurrentTarget(agent) <= NAV_SUCCESS_DIST;
+            default          -> distanceToCurrentTarget(agent) <= NAV_SUCCESS_DIST;
+        };
     }
 
     // ------------------------------------------------------------------
-    // Task progress (for info dict)
+    // Task progress
     // ------------------------------------------------------------------
 
     private double taskProgress(RLNpcEntity agent) {
-        if ("farming".equals(state.taskName)) {
-            return state.lastInteractValid
-                ? 1.0
-                : Math.max(0.0, 1.0 - Math.min(distanceToTarget(agent) / 4.0, 1.0));
+        return switch (state.taskName) {
+            case "farming", "multitask" -> {
+                if (state.totalCrops == 0) yield 0.0;
+                yield (double) state.cropsHarvested / state.totalCrops;
+            }
+            case "combat" -> {
+                if (state.hostileMobUuids.isEmpty()) yield 1.0;
+                long aliveMobs = state.hostileMobUuids.stream()
+                        .filter(uuid -> {
+                            ServerPlayer obs = getObserverPlayer();
+                            if (obs == null) return false;
+                            Entity e = obs.serverLevel().getEntity(uuid);
+                            return e != null && e.isAlive();
+                        }).count();
+                yield 1.0 - (double) aliveMobs / state.hostileMobUuids.size();
+            }
+            default -> {
+                double dist = distanceToCurrentTarget(agent);
+                double maxD = Math.max(state.curriculumMaxDist, 10.0);
+                yield Math.max(0.0, 1.0 - dist / maxD);
+            }
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Pitch helper
+    // ------------------------------------------------------------------
+
+    private float computeNaturalPitch(RLNpcEntity agent, EpisodeState state) {
+        // Look slightly down when near target (crop/marker), up when far
+        double dist = distanceToCurrentTarget(agent);
+        if ("farming".equals(state.taskName) && dist < 2.0) return 30.0f;  // look at crop
+        if (dist < 3.0) return 15.0f;
+        return 0.0f;
+    }
+
+    // ------------------------------------------------------------------
+    // World settings
+    // ------------------------------------------------------------------
+
+    private void applyWorldSettings() {
+        ServerPlayer p = getObserverPlayer();
+        if (p == null) return;
+        ServerLevel level = p.serverLevel();
+        // Always night so mobs don't burn
+        level.setDayTime(18000L);
+        // Set difficulty to at least Normal so mobs deal damage
+        if (level.getDifficulty() == Difficulty.PEACEFUL) {
+            server.setDifficulty(Difficulty.NORMAL, true);
         }
-        return Math.max(0.0, 1.0 - Math.min(distanceToTarget(agent) / 8.0, 1.0));
+        // Disable natural mob spawning (we spawn manually)
+        level.getGameRules().getRule(GameRules.RULE_DOMOBSPAWNING).set(false, server);
+        // Keep inventory on death
+        level.getGameRules().getRule(GameRules.RULE_KEEPINVENTORY).set(true, server);
+        // Disable daylight cycle so it stays night
+        level.getGameRules().getRule(GameRules.RULE_DAYLIGHT).set(false, server);
     }
 
     // ------------------------------------------------------------------
@@ -365,153 +491,77 @@ public class EnvironmentManager {
     // ------------------------------------------------------------------
 
     private RLNpcEntity getOrCreateAgent(ServerLevel level) {
-        RLNpcEntity existing = getTrackedAgent(level);
-        if (existing != null && existing.isAlive()) return existing;
-
+        if (state.agentUuid != null) {
+            Entity e = level.getEntity(state.agentUuid);
+            if (e instanceof RLNpcEntity npc && npc.isAlive()) return npc;
+        }
         RLNpcEntity agent = ModEntities.RL_NPC.get().create(level);
-        if (agent == null) throw new IllegalStateException("Failed to create RL NPC entity");
-
-        agent.setCustomName(Component.literal("RL NPC"));
+        if (agent == null) throw new IllegalStateException("Failed to create RLNpcEntity");
+        agent.setCustomName(Component.literal("RL Agent"));
         agent.setCustomNameVisible(true);
-        agent.setInvulnerable(true);
+        agent.setInvulnerable(false);  // Can take damage from mobs
         agent.setNoAi(true);
         agent.setSilent(true);
         agent.setPersistenceRequired();
-
+        // Give full health
+        agent.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH).setBaseValue(20.0);
+        agent.setHealth(20.0f);
         level.addFreshEntity(agent);
         state.agentUuid = agent.getUUID();
         return agent;
-    }
-
-    private RLNpcEntity getTrackedAgent(ServerLevel level) {
-        UUID uuid = state.agentUuid;
-        if (uuid == null) return null;
-        Entity entity = level.getEntity(uuid);
-        return (entity instanceof RLNpcEntity npc) ? npc : null;
     }
 
     private void placeAgent(RLNpcEntity agent, double x, double y, double z, float yaw) {
         agent.moveTo(x, y, z, yaw, 0.0f);
         agent.setDeltaMovement(0.0, 0.0, 0.0);
         agent.fallDistance = 0.0f;
-        agent.setYRot(yaw);
-        agent.setYHeadRot(yaw);
-        agent.yBodyRot = yaw;
-        agent.yHeadRot = yaw;
+        agent.setHealth(20.0f);
+        ActionExecutor.syncRotations(agent, yaw, 0.0f);
+        state.health   = 20.0f;
+        state.foodLevel = 20;
+        state.saturation = 5.0f;
     }
 
     // ------------------------------------------------------------------
-    // Block / marker helpers
+    // Distance helpers
     // ------------------------------------------------------------------
 
-    private void clearTaskArtifacts(ServerLevel level) {
-        if (state.markerPos != null) {
-            level.setBlockAndUpdate(state.markerPos, Blocks.AIR.defaultBlockState());
-            state.markerPos = null;
-        }
-        if (state.farmingCropPos != null) {
-            level.setBlockAndUpdate(state.farmingCropPos, Blocks.AIR.defaultBlockState());
-            state.farmingCropPos = null;
-        }
-        if (state.farmingSoilPos != null) {
-            level.setBlockAndUpdate(state.farmingSoilPos, Blocks.GRASS_BLOCK.defaultBlockState());
-            state.farmingSoilPos = null;
-        }
-        for (BlockPos pos : state.obstaclePositions) {
-            level.setBlockAndUpdate(pos, Blocks.AIR.defaultBlockState());
-        }
-        state.obstaclePositions.clear();
-    }
-
-    private void clearFarmArea(ServerLevel level, int centerX, int centerZ) {
-        int groundY = getReferenceGroundY(level, centerX, centerZ);
-        for (int x = centerX - 1; x <= centerX + 1; x++) {
-            for (int z = centerZ - 1; z <= centerZ + 1; z++) {
-                for (int y = groundY; y <= groundY + 4; y++) {
-                    BlockPos pos = new BlockPos(x, y, z);
-                    if (!level.getBlockState(pos).is(Blocks.BEDROCK)) {
-                        level.setBlockAndUpdate(pos, y == groundY
-                                ? Blocks.GRASS_BLOCK.defaultBlockState()
-                                : Blocks.AIR.defaultBlockState());
-                    }
-                }
-            }
-        }
-    }
-
-    private void placeMarker(ServerLevel level) {
-        BlockPos markerPos;
-        if ("farming".equals(state.taskName) && state.farmingCropPos != null) {
-            markerPos = state.farmingCropPos.east();
-            level.setBlockAndUpdate(markerPos, Blocks.EMERALD_BLOCK.defaultBlockState());
-        } else {
-            int markerX = (int) Math.floor(state.targetX);
-            int groundY = (int) Math.floor(resolveGroundY(level, state.targetX, state.targetZ));
-            int markerZ = (int) Math.floor(state.targetZ);
-            markerPos   = new BlockPos(markerX, groundY + 1, markerZ);
-            level.setBlockAndUpdate(markerPos, Blocks.GOLD_BLOCK.defaultBlockState());
-        }
-        state.markerPos = markerPos;
-    }
-
-    // ------------------------------------------------------------------
-    // Y resolution helpers
-    // ------------------------------------------------------------------
-
-    private double resolveGroundY(ServerLevel level, double x, double z) {
-        BlockPos top = level.getHeightmapPos(
-                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-                new BlockPos((int) Math.round(x), 0, (int) Math.round(z)));
-        return top.getY() - 1.0;
-    }
-
-    private double resolveStandY(ServerLevel level, double x, double z) {
-        BlockPos top = level.getHeightmapPos(
-                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-                new BlockPos((int) Math.round(x), 0, (int) Math.round(z)));
-        return top.getY();
-    }
-
-    private int getReferenceGroundY(ServerLevel level, int x, int z) {
-        BlockPos top = level.getHeightmapPos(
-                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, new BlockPos(x, 0, z));
-        return top.getY() - 1;
+    private double distanceToCurrentTarget(RLNpcEntity agent) {
+        double dx = state.targetX - agent.getX();
+        double dz = state.targetZ - agent.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
     }
 
     // ------------------------------------------------------------------
     // Misc
     // ------------------------------------------------------------------
 
-    private double distanceToTarget(RLNpcEntity agent) {
-        double dx = state.targetX - agent.getX();
-        double dz = state.targetZ - agent.getZ();
-        return Math.sqrt(dx * dx + dz * dz);
-    }
-
     private ServerPlayer getObserverPlayer() {
         List<ServerPlayer> players = server.getPlayerList().getPlayers();
         return players.isEmpty() ? null : players.get(0);
-    }
-
-    public synchronized void notifyPlayer(String text) {
-        ServerPlayer player = getObserverPlayer();
-        if (player != null) player.sendSystemMessage(Component.literal(text));
     }
 
     // ------------------------------------------------------------------
     // JSON helpers
     // ------------------------------------------------------------------
 
-    private Map<String,Object> buildInfo(boolean success, double distance, double progress) {
+    private Map<String,Object> buildInfo(boolean success, double dist, double progress) {
         Map<String,Object> info = new HashMap<>();
         info.put("task_name",            state.taskName);
         info.put("success",              success);
         info.put("episode_step",         state.episodeStep);
-        info.put("distance_to_target",   round(distance));
+        info.put("distance_to_target",   round(dist));
         info.put("stuck_steps",          state.stuckSteps);
         info.put("task_progress",        round(progress));
         info.put("invalid_action_count", state.invalidActionCount);
         info.put("sparse_reward",        state.sparseReward);
+        info.put("health",               round(state.health));
+        info.put("food_level",           state.foodLevel);
+        info.put("crops_harvested",      state.cropsHarvested);
+        info.put("total_crops",          state.totalCrops);
+        info.put("mobs_killed",          state.mobsKilled);
+        info.put("active_slot",          state.activeSlot);
+        info.put("active_item",          InventoryManager.getActiveItemName(state));
         return info;
     }
 
@@ -547,7 +597,7 @@ public class EnvironmentManager {
     }
 
     private String escape(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+        return s.replace("\\","\\\\").replace("\"","\\\"");
     }
 
     private double round(double v) {

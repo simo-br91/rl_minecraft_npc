@@ -1,11 +1,13 @@
 """
-train_navigation.py
--------------------
-Trains navigation with SHAPED rewards (primary baseline).
+train_combat.py
+---------------
+Trains the agent to fight zombies and skeletons.
 
-Reads hyperparameters from python_rl/configs/nav_shaped.yaml.
-Saves periodic checkpoints every 25k steps.
-Uses VecNormalize for observation normalization.
+The agent:
+ - Starts with an iron sword (slot 0), food (slot 1), iron armor
+ - Must kill all spawned mobs to succeed
+ - Can die and episode resets (agent respawns next episode)
+ - Uses switch_item, attack, eat actions
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from python_rl.train.train_utils import (
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="nav_shaped")
+    parser.add_argument("--config", default="combat")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
@@ -34,25 +36,25 @@ def main() -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-    env = MinecraftEnv(task="navigation")
-    vec_env, _ = wrap_env(env, str(logs_dir / "nav_shaped_monitor.csv"), normalize=False)
+    env = MinecraftEnv(task="combat")
+    vec_env, _ = wrap_env(env, str(logs_dir / "combat_monitor.csv"), normalize=False)
 
-    success_cb   = SuccessLogger(str(logs_dir / "nav_shaped_success.csv"))
+    success_cb    = SuccessLogger(str(logs_dir / "combat_success.csv"))
     checkpoint_cb = make_periodic_checkpoint(
-        str(checkpoints_dir / "nav_shaped_checkpoints"), prefix="nav_shaped")
+        str(checkpoints_dir / "combat_checkpoints"), prefix="combat")
 
-    warmstart = [checkpoints_dir / "nav_shaped_run1"] if args.resume else []
+    warmstart = [checkpoints_dir / "combat_run1"] if args.resume else []
     model = load_model_with_warmstart(warmstart, vec_env, cfg, str(logs_dir))
 
     model.learn(
-        total_timesteps=cfg.get("total_timesteps", 200_000),
+        total_timesteps=cfg.get("total_timesteps", 300_000),
         callback=CallbackList([success_cb, checkpoint_cb]),
         reset_num_timesteps=not args.resume,
     )
-    model.save(str(checkpoints_dir / "nav_shaped_run1"))
+    model.save(str(checkpoints_dir / "combat_run1"))
     vec_env.close()
-    print("Navigation (shaped) training complete.")
-    print("Checkpoint : python_rl/checkpoints/nav_shaped_run1")
+    print("Combat training complete.")
+    print("Checkpoint : python_rl/checkpoints/combat_run1")
 
 
 if __name__ == "__main__":

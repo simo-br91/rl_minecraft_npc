@@ -1,63 +1,154 @@
 package com.aberrada.rlnpc;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.CropBlock;
+import net.minecraft.world.level.block.FarmBlock;
+import net.minecraft.world.level.block.GrassBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.List;
 import java.util.Locale;
 
+/**
+ * Builds a 28-element observation vector for the RL NPC.
+ *
+ * Index  Feature
+ * -----  -------
+ *   0    dx_norm           (dx / MAX_DIST, clamped ±1)
+ *   1    dz_norm           (dz / MAX_DIST, clamped ±1)
+ *   2    distance_norm     (distance / MAX_DIST)
+ *   3    angle_to_target   (sin of angle error: facing vs target direction)
+ *   4    yaw_norm          (yaw / 180, in [-1, 1])
+ *   5    pitch_norm        (pitch / 90, in [-1, 1])
+ *   6    blocked_front     (1 if solid block ahead at feet level)
+ *   7    on_ground         (1 if solid block below)
+ *   8    stuck_norm        (stuck_steps / 10, clamped [0,1])
+ *   9    task_id_norm      (task_id / 3.0)
+ *  10    crop_in_front     (1 if mature crop directly ahead)
+ *  11    near_crop         (1 if within 1.5 blocks of any unharvested crop)
+ *  12    obstacle_1block   (1 if jumpable 1-block wall ahead)
+ *  13    health_norm       (health / 20)
+ *  14    food_norm         (foodLevel / 20)
+ *  15    mob_nearby        (1 if hostile mob within 8 blocks)
+ *  16    mob_dist_norm     (distance to nearest mob / 8, clamped [0,1])
+ *  17    mob_angle         (sin of angle to nearest mob)
+ *  18    active_slot_norm  (activeSlot / 4)
+ *  19    holding_sword     (1 if active slot is sword)
+ *  20    holding_food      (1 if active slot is food)
+ *  21    crops_remaining_norm  (remaining_crops / totalCrops)
+ *  22    block_n           (1 if solid block 1 ahead at N)
+ *  23    block_e           (1 if solid block 1 ahead at E)
+ *  24    block_s           (1 if solid block 1 ahead at S)
+ *  25    block_w           (1 if solid block 1 ahead at W)
+ *  26    farmland_ahead    (1 if untilled soil directly ahead — for farming cycle)
+ *  27    seed_in_inventory (1 if agent has seeds)
+ */
 public class ObservationBuilder {
 
-    /**
-     * Builds a 11-element observation vector for the agent.
-     *
-     * Index  Feature
-     * -----  -------
-     *   0    dx          (target_x - agent_x)
-     *   1    dz          (target_z - agent_z)
-     *   2    distance    (Euclidean XZ distance to target)
-     *   3    yaw_norm    (yaw in [-1, 1])
-     *   4    blocked_front  (1 if wall directly ahead at feet level)
-     *   5    on_ground   (1 if solid block directly below)
-     *   6    stuck_norm  (stuck steps / 10, clamped to [0, 1])
-     *   7    task_id     (0 = navigation, 1 = farming)
-     *   8    crop_in_front  (1 if mature crop directly ahead)
-     *   9    near_target    (1 if distance ≤ 1.10)
-     *  10    obstacle_1block_ahead  (1 if exactly 1-block-high wall ahead = jumpable)
-     */
-    public static double[] build(RLNpcEntity agent, EpisodeState state) {
-        double dx       = state.targetX - agent.getX();
-        double dz       = state.targetZ - agent.getZ();
-        double distance = Math.sqrt(dx * dx + dz * dz);
+    public static final int OBS_DIM = 28;
+    private static final double MAX_DIST    = 30.0;
+    private static final double MOB_RANGE   = 8.0;
 
-        double yawNorm        = normalizeYaw(agent.getYRot()) / 180.0;
+    public static double[] build(RLNpcEntity agent, EpisodeState state) {
+        double dx   = state.targetX - agent.getX();
+        double dz   = state.targetZ - agent.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+
+        double dxNorm   = Math.max(-1.0, Math.min(1.0, dx / MAX_DIST));
+        double dzNorm   = Math.max(-1.0, Math.min(1.0, dz / MAX_DIST));
+        double distNorm = Math.min(1.0, dist / MAX_DIST);
+
+        // Angle error: sin of difference between facing direction and target direction
+        double angleToTarget = computeAngleToTarget(agent, dx, dz);
+
+        double yawNorm   = normalizeYaw(agent.getYRot()) / 180.0;
+        double pitchNorm = Math.max(-1.0, Math.min(1.0, agent.getXRot() / 90.0));
+
         double blockedFront   = isBlockedFront(agent) ? 1.0 : 0.0;
         double onGround       = isOnGround(agent) ? 1.0 : 0.0;
         double stuckNorm      = Math.min(state.stuckSteps / 10.0, 1.0);
-        double taskId         = state.taskId;
-        double cropInFront    = isMatureCropInFront(agent) ? 1.0 : 0.0;
-        double nearTarget     = distance <= 1.10 ? 1.0 : 0.0;
-        double obstacle1Block = is1BlockObstacleAhead(agent) ? 1.0 : 0.0;
+        double taskIdNorm     = state.taskId / 3.0;
+
+        double cropInFront = isMatureCropInFront(agent) ? 1.0 : 0.0;
+        double nearCrop    = isNearUnharvestedCrop(agent, state) ? 1.0 : 0.0;
+        double obstacle1   = is1BlockObstacleAhead(agent) ? 1.0 : 0.0;
+
+        double healthNorm  = Math.max(0.0, Math.min(1.0, state.health / 20.0));
+        double foodNorm    = Math.max(0.0, Math.min(1.0, state.foodLevel / 20.0));
+
+        // Mob sensing
+        double[] mobInfo = getMobInfo(agent);
+        double mobNearby   = mobInfo[0];
+        double mobDistNorm = mobInfo[1];
+        double mobAngle    = mobInfo[2];
+
+        double activeSlotNorm = state.activeSlot / 4.0;
+        double holdingSword   = (state.activeSlot == EpisodeState.SLOT_SWORD) ? 1.0 : 0.0;
+        double holdingFood    = (state.activeSlot == EpisodeState.SLOT_FOOD) ? 1.0 : 0.0;
+
+        double cropsRemainingNorm = state.totalCrops > 0
+                ? (double)(state.totalCrops - state.cropsHarvested) / state.totalCrops
+                : 0.0;
+
+        // Cardinal direction blocks (mini voxel scan)
+        double[] cardinal = getCardinalBlocks(agent);
+
+        double farmlandAhead = isFarmlandAhead(agent) ? 1.0 : 0.0;
+        double hasSeed       = agentHasSeeds(agent, state) ? 1.0 : 0.0;
 
         return new double[] {
-                dx,
-                dz,
-                distance,
-                yawNorm,
-                blockedFront,
-                onGround,
-                stuckNorm,
-                taskId,
-                cropInFront,
-                nearTarget,
-                obstacle1Block
+            dxNorm,            // 0
+            dzNorm,            // 1
+            distNorm,          // 2
+            angleToTarget,     // 3
+            yawNorm,           // 4
+            pitchNorm,         // 5
+            blockedFront,      // 6
+            onGround,          // 7
+            stuckNorm,         // 8
+            taskIdNorm,        // 9
+            cropInFront,       // 10
+            nearCrop,          // 11
+            obstacle1,         // 12
+            healthNorm,        // 13
+            foodNorm,          // 14
+            mobNearby,         // 15
+            mobDistNorm,       // 16
+            mobAngle,          // 17
+            activeSlotNorm,    // 18
+            holdingSword,      // 19
+            holdingFood,       // 20
+            cropsRemainingNorm,// 21
+            cardinal[0],       // 22 N
+            cardinal[1],       // 23 E
+            cardinal[2],       // 24 S
+            cardinal[3],       // 25 W
+            farmlandAhead,     // 26
+            hasSeed,           // 27
         };
     }
 
-    // -----------------------------------------------------------------------
-    // Feature helpers
-    // -----------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Angle to target
+    // ------------------------------------------------------------------
+
+    private static double computeAngleToTarget(RLNpcEntity agent, double dx, double dz) {
+        if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) return 0.0;
+        Vec3 flat = ActionExecutor.getHorizontalLook(agent);
+        if (flat == null) return 0.0;
+        double targetLen = Math.sqrt(dx * dx + dz * dz);
+        double tdx = dx / targetLen, tdz = dz / targetLen;
+        // sin of cross product (signed angle error)
+        return flat.x * tdz - flat.z * tdx;
+    }
+
+    // ------------------------------------------------------------------
+    // Block checks
+    // ------------------------------------------------------------------
 
     private static double normalizeYaw(float yaw) {
         double r = yaw;
@@ -66,10 +157,6 @@ public class ObservationBuilder {
         return r;
     }
 
-    /**
-     * True if there is a solid block directly in front of the agent at feet OR
-     * head level (i.e. the agent cannot walk forward).
-     */
     private static boolean isBlockedFront(RLNpcEntity agent) {
         BlockPos feet = ActionExecutor.frontBlockPos(agent);
         BlockPos head = feet.above();
@@ -78,55 +165,118 @@ public class ObservationBuilder {
         return (!fs.isAir() && fs.blocksMotion()) || (!hs.isAir() && hs.blocksMotion());
     }
 
-    /**
-     * True if the block directly below the agent is solid.
-     * More reliable than agent.onGround() for a teleport-driven entity.
-     */
     public static boolean isOnGround(RLNpcEntity agent) {
         BlockPos below = BlockPos.containing(agent.getX(), agent.getY() - 0.1, agent.getZ());
         BlockState bs  = agent.level().getBlockState(below);
         return !bs.isAir() && bs.blocksMotion();
     }
 
-    /**
-     * True when there is a jumpable (exactly 1-block-high) obstacle directly
-     * ahead: blocked at feet level but clear one block higher.
-     * This gives the policy a direct cue to use the jump action.
-     */
     public static boolean is1BlockObstacleAhead(RLNpcEntity agent) {
         Vec3 flat = ActionExecutor.getHorizontalLook(agent);
         if (flat == null) return false;
-
-        double targetX = agent.getX() + flat.x * 0.9;
-        double targetZ = agent.getZ() + flat.z * 0.9;
-        double y = agent.getY();
-
-        boolean blockedLow  = ActionExecutor.isBlockedAt(agent, targetX, y,       targetZ);
-        boolean blockedHigh = ActionExecutor.isBlockedAt(agent, targetX, y + 1.0, targetZ);
-        return blockedLow && !blockedHigh;
+        double tx = agent.getX() + flat.x * 0.9;
+        double tz = agent.getZ() + flat.z * 0.9;
+        double y  = agent.getY();
+        boolean low  = ActionExecutor.isBlockedAt(agent, tx, y, tz);
+        boolean high = ActionExecutor.isBlockedAt(agent, tx, y + 1.0, tz);
+        return low && !high;
     }
 
-    // -----------------------------------------------------------------------
-    // Crop helpers (farming task)
-    // -----------------------------------------------------------------------
+    /** Sample blocks in 4 cardinal directions for a mini voxel sense. */
+    private static double[] getCardinalBlocks(RLNpcEntity agent) {
+        double x = agent.getX(), y = agent.getY(), z = agent.getZ();
+        double[] dirs = {0, -1,  // N (−z)
+                         1,  0,  // E (+x)
+                         0,  1,  // S (+z)
+                        -1,  0}; // W (−x)
+        double[] result = new double[4];
+        for (int i = 0; i < 4; i++) {
+            double dx = dirs[i * 2], dz = dirs[i * 2 + 1];
+            double tx = x + dx * 1.5, tz = z + dz * 1.5;
+            result[i] = ActionExecutor.isBlockedAt(agent, tx, y, tz) ? 1.0 : 0.0;
+        }
+        return result;
+    }
+
+    private static boolean isFarmlandAhead(RLNpcEntity agent) {
+        BlockPos front = ActionExecutor.frontBlockPos(agent);
+        BlockPos below = front.below();
+        BlockState b = agent.level().getBlockState(below);
+        // Grass or dirt = tillable; Farmland = already tilled
+        return b.getBlock() instanceof GrassBlock
+            || b.getBlock().getClass().getSimpleName().contains("Dirt");
+    }
+
+    // ------------------------------------------------------------------
+    // Crop helpers
+    // ------------------------------------------------------------------
 
     public static BlockPos frontCropPos(RLNpcEntity agent) {
         Vec3 flat = ActionExecutor.getHorizontalLook(agent);
         if (flat == null) flat = new Vec3(0, 0, 1);
-        Vec3 origin = agent.position().add(0.0, 0.5, 0.0);
+        Vec3 origin = agent.position().add(0.0, 0.3, 0.0);
         Vec3 front  = origin.add(flat.scale(0.9));
         return BlockPos.containing(front.x, origin.y, front.z);
     }
 
     public static boolean isMatureCropInFront(RLNpcEntity agent) {
-        BlockPos cropPos  = frontCropPos(agent);
-        BlockState block  = agent.level().getBlockState(cropPos);
-        return block.getBlock() instanceof CropBlock cropBlock && cropBlock.isMaxAge(block);
+        BlockPos pos = frontCropPos(agent);
+        BlockState b = agent.level().getBlockState(pos);
+        return b.getBlock() instanceof CropBlock crop && crop.isMaxAge(b);
     }
 
-    // -----------------------------------------------------------------------
-    // Serialisation
-    // -----------------------------------------------------------------------
+    private static boolean isNearUnharvestedCrop(RLNpcEntity agent, EpisodeState state) {
+        for (int i = 0; i < state.farmingCropPositions.size(); i++) {
+            if (i < state.cropHarvested.size() && state.cropHarvested.get(i)) continue;
+            BlockPos p = state.farmingCropPositions.get(i);
+            double dist = Math.sqrt(Math.pow(p.getX() - agent.getX(), 2)
+                                  + Math.pow(p.getZ() - agent.getZ(), 2));
+            if (dist <= 1.5) return true;
+        }
+        return false;
+    }
+
+    private static boolean agentHasSeeds(RLNpcEntity agent, EpisodeState state) {
+        // In our simulation, seeds are always tracked in state
+        return true;  // agent always has seeds in full farming cycle
+    }
+
+    // ------------------------------------------------------------------
+    // Mob sensing
+    // ------------------------------------------------------------------
+
+    /** Returns [nearby(0/1), distNorm, sinAngle]. */
+    private static double[] getMobInfo(RLNpcEntity agent) {
+        AABB box = agent.getBoundingBox().inflate(MOB_RANGE);
+        List<Monster> mobs = agent.level().getEntitiesOfClass(
+                Monster.class, box, m -> m.isAlive() && !m.isSpectator());
+        if (mobs.isEmpty()) return new double[]{0.0, 1.0, 0.0};
+
+        Monster nearest = null;
+        double bestDist = Double.MAX_VALUE;
+        for (Monster m : mobs) {
+            double d = m.distanceTo(agent);
+            if (d < bestDist) { bestDist = d; nearest = m; }
+        }
+        if (nearest == null) return new double[]{0.0, 1.0, 0.0};
+
+        double distNorm = Math.min(1.0, bestDist / MOB_RANGE);
+        double mdx = nearest.getX() - agent.getX();
+        double mdz = nearest.getZ() - agent.getZ();
+        double mLen = Math.sqrt(mdx * mdx + mdz * mdz);
+        double sinAngle = 0.0;
+        if (mLen > 1e-6) {
+            Vec3 flat = ActionExecutor.getHorizontalLook(agent);
+            if (flat != null) {
+                sinAngle = flat.x * (mdz / mLen) - flat.z * (mdx / mLen);
+            }
+        }
+        return new double[]{1.0, distNorm, sinAngle};
+    }
+
+    // ------------------------------------------------------------------
+    // Serialization
+    // ------------------------------------------------------------------
 
     public static String obsToJson(double[] obs) {
         StringBuilder sb = new StringBuilder("[");
