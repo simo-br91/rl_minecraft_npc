@@ -5,7 +5,6 @@ from .curriculum_scheduler import (
     FarmingCurriculumScheduler,
     NAV_CURRICULUM_LEVELS,
     FARMING_CURRICULUM_LEVELS,
-    CURRICULUM_LEVELS,   # backward compat
 )
 
 __all__ = [
@@ -14,5 +13,4 @@ __all__ = [
     "FarmingCurriculumScheduler",
     "NAV_CURRICULUM_LEVELS",
     "FARMING_CURRICULUM_LEVELS",
-    "CURRICULUM_LEVELS",
 ]

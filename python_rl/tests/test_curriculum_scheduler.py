@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
+import python_rl.train.curriculum_scheduler as _sched_mod
 from python_rl.train.curriculum_scheduler import (
     CurriculumScheduler,
     NavCurriculumScheduler,
     FarmingCurriculumScheduler,
     NAV_CURRICULUM_LEVELS,
     FARMING_CURRICULUM_LEVELS,
-    CURRICULUM_LEVELS,
 )
 
 
@@ -73,7 +73,12 @@ class TestLevelDefinitions:
             assert required.issubset(lvl.keys())
 
     def test_backward_compat_alias(self):
-        assert CURRICULUM_LEVELS is NAV_CURRICULUM_LEVELS
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            alias = _sched_mod.CURRICULUM_LEVELS
+        assert alias is NAV_CURRICULUM_LEVELS
+        assert any("CURRICULUM_LEVELS is deprecated" in str(x.message) for x in w)
 
 
 # ------------------------------------------------------------------ #
