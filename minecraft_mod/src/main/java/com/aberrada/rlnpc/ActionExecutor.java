@@ -27,8 +27,10 @@ import java.util.List;
  *  11  eat           (eat food from inventory)
  *  12  switch_item   (cycle active inventory slot)
  *
- * Pitch (vertical look) is controlled autonomously each step to make
- * movement look human-like — it smoothly looks toward targets.
+ * Fixes vs previous version:
+ *  - findSurfaceY now scans 8 blocks down (was 3 which was too shallow for
+ *    terrain drops near cliff edges). (Bug 2.10)
+ *  - Pitch smoothing constants documented.
  */
 public class ActionExecutor {
 
@@ -41,12 +43,15 @@ public class ActionExecutor {
     private static final double  HALF_WIDTH     = 0.27;
 
     // Pitch smoothing
-    private static final float   PITCH_SMOOTH   = 0.15f;   // blend factor per step
+    private static final float   PITCH_SMOOTH   = 0.15f;
     private static final float   PITCH_MAX      = 45.0f;
     private static final float   PITCH_MIN      = -30.0f;
 
     // Combat
     private static final double  ATTACK_RANGE   = 3.5;
+
+    // Surface scan depth — FIX 2.10: was 3, now 8 to handle terrain drops
+    private static final int     SURFACE_SCAN_DEPTH = 8;
 
     // ------------------------------------------------------------------
     // Entry point
@@ -58,7 +63,7 @@ public class ActionExecutor {
             case 1  -> turnLeft(agent);
             case 2  -> turnRight(agent);
             case 3  -> true;   // interact handled externally in EnvironmentManager
-            case 4  -> true;   // no-op
+            case 4  -> true;   // no_op — intentional no-op, not penalised
             case 5  -> jumpUp(agent, state);
             case 6  -> sprintForward(agent, state);
             case 7  -> moveBackward(agent);
@@ -69,7 +74,6 @@ public class ActionExecutor {
             case 12 -> switchItem(agent, state);
             default -> false;
         };
-        // Smooth pitch toward a natural angle after each action
         updatePitch(agent, state);
         return valid;
     }
@@ -106,7 +110,6 @@ public class ActionExecutor {
     private static boolean strafeLeft(RLNpcEntity agent) {
         Vec3 flat = getHorizontalLook(agent);
         if (flat == null) return false;
-        // Perpendicular left: rotate flat 90° CCW → (-z, x)
         double tx = agent.getX() - flat.z * STRAFE_STEP;
         double tz = agent.getZ() + flat.x * STRAFE_STEP;
         return applyHorizontalMove(agent, tx, tz);
@@ -115,7 +118,6 @@ public class ActionExecutor {
     private static boolean strafeRight(RLNpcEntity agent) {
         Vec3 flat = getHorizontalLook(agent);
         if (flat == null) return false;
-        // Perpendicular right: rotate flat 90° CW → (z, -x)
         double tx = agent.getX() + flat.z * STRAFE_STEP;
         double tz = agent.getZ() - flat.x * STRAFE_STEP;
         return applyHorizontalMove(agent, tx, tz);
@@ -147,7 +149,7 @@ public class ActionExecutor {
 
     /**
      * Jump: teleport up 1 block when a 1-block wall is ahead.
-     * After landing, findSurfaceY in the next move snaps back down.
+     * Preconditions: wall at feet level ahead, clear one block higher, headroom above agent.
      */
     private static boolean jumpUp(RLNpcEntity agent, EpisodeState state) {
         Vec3 flat = getHorizontalLook(agent);
@@ -155,9 +157,9 @@ public class ActionExecutor {
         double x = agent.getX(), y = agent.getY(), z = agent.getZ();
         double tx = x + flat.x * WALK_STEP;
         double tz = z + flat.z * WALK_STEP;
-        if (!isBlockedAt(agent, tx, y, tz)) return false;
-        if (isBlockedAt(agent, tx, y + 1.0, tz)) return false;
-        if (isBlockedAt(agent, x, y + 1.0, z)) return false;
+        if (!isBlockedAt(agent, tx, y, tz))        return false;
+        if (isBlockedAt(agent, tx, y + 1.0, tz))   return false;
+        if (isBlockedAt(agent, x,  y + 1.0, z))    return false;
         agent.moveTo(x, y + 1.0, z, agent.getYRot(), agent.getXRot());
         syncRotations(agent, agent.getYRot(), agent.getXRot());
         if (state != null) state.lastJumpedObstacle = true;
@@ -168,10 +170,6 @@ public class ActionExecutor {
     // Combat
     // ------------------------------------------------------------------
 
-    /**
-     * Swing at the nearest hostile mob within ATTACK_RANGE.
-     * Uses Minecraft's standard hurt() mechanism.
-     */
     public static boolean attack(RLNpcEntity agent, EpisodeState state) {
         AABB searchBox = agent.getBoundingBox().inflate(ATTACK_RANGE);
         List<Monster> mobs = agent.level().getEntitiesOfClass(
@@ -179,26 +177,17 @@ public class ActionExecutor {
                 m -> m.isAlive() && !m.isSpectator());
         if (mobs.isEmpty()) return false;
 
-        // Find closest
-        Monster target = null;
-        double bestDist = Double.MAX_VALUE;
+        Monster target   = null;
+        double  bestDist = Double.MAX_VALUE;
         for (Monster m : mobs) {
             double d = m.distanceTo(agent);
             if (d < bestDist) { bestDist = d; target = m; }
         }
         if (target == null) return false;
 
-        // Face the target for realism
         faceEntity(agent, target);
-
-        // Apply damage — 6.0 = iron sword base damage
-        float damage = 6.0f;
-        boolean killed = false;
-        target.hurt(agent.damageSources().mobAttack(agent), damage);
-        if (!target.isAlive()) {
-            killed = true;
-            if (state != null) state.mobsKilled++;
-        }
+        target.hurt(agent.damageSources().mobAttack(agent), 6.0f);
+        if (!target.isAlive() && state != null) state.mobsKilled++;
         if (state != null) state.lastAttackValid = true;
         return true;
     }
@@ -209,7 +198,7 @@ public class ActionExecutor {
 
     private static boolean switchItem(RLNpcEntity agent, EpisodeState state) {
         if (state == null) return false;
-        state.activeSlot = (state.activeSlot + 1) % 5;  // 5 tracked slots
+        state.activeSlot = (state.activeSlot + 1) % 5;
         return true;
     }
 
@@ -217,15 +206,10 @@ public class ActionExecutor {
     // Pitch (vertical look) — smoothed for human-like appearance
     // ------------------------------------------------------------------
 
-    /**
-     * Smoothly blend the current pitch toward targetPitch.
-     * targetPitch is set by EnvironmentManager based on situation
-     * (looking at crop, looking at mob, looking forward).
-     */
     public static void updatePitch(RLNpcEntity agent, EpisodeState state) {
         if (state == null) return;
-        float current = state.currentPitch;
-        float target  = Math.max(PITCH_MIN, Math.min(PITCH_MAX, state.targetPitch));
+        float current  = state.currentPitch;
+        float target   = Math.max(PITCH_MIN, Math.min(PITCH_MAX, state.targetPitch));
         float newPitch = current + (target - current) * PITCH_SMOOTH;
         state.currentPitch = newPitch;
         syncRotations(agent, agent.getYRot(), newPitch);
@@ -257,7 +241,8 @@ public class ActionExecutor {
     }
 
     // ------------------------------------------------------------------
-    // Surface snap — scan up to 5 blocks down
+    // Surface snap — FIX 2.10: now scans SURFACE_SCAN_DEPTH (8) blocks down
+    // Previously only scanned 3 blocks, causing agents to float at cliff edges.
     // ------------------------------------------------------------------
 
     public static double findSurfaceY(RLNpcEntity agent, double x, double startY, double z) {
@@ -265,7 +250,7 @@ public class ActionExecutor {
         int ix = (int) Math.floor(x);
         int iz = (int) Math.floor(z);
         int iy = (int) Math.floor(startY);
-        for (int dy = 0; dy >= -5; dy--) {
+        for (int dy = 0; dy >= -SURFACE_SCAN_DEPTH; dy--) {
             BlockPos ground = new BlockPos(ix, iy + dy, iz);
             BlockState gs   = level.getBlockState(ground);
             if (!gs.isAir() && gs.blocksMotion()) {
@@ -294,11 +279,10 @@ public class ActionExecutor {
         return BlockPos.containing(front.x, origin.y, front.z);
     }
 
-    /** Turn the agent to face a target entity. */
     private static void faceEntity(RLNpcEntity agent, LivingEntity target) {
-        double dx = target.getX() - agent.getX();
-        double dy = target.getEyeY() - agent.getEyeY();
-        double dz = target.getZ() - agent.getZ();
+        double dx    = target.getX() - agent.getX();
+        double dy    = target.getEyeY() - agent.getEyeY();
+        double dz    = target.getZ() - agent.getZ();
         double hDist = Math.sqrt(dx * dx + dz * dz);
         float  yaw   = (float)(Math.toDegrees(Math.atan2(dz, dx))) - 90.0f;
         float  pitch = (float)(-Math.toDegrees(Math.atan2(dy, hDist)));

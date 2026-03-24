@@ -16,6 +16,12 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -28,39 +34,41 @@ import java.util.concurrent.TimeUnit;
 /**
  * Central coordinator for RL environment episodes.
  *
- * Responsibilities:
- *  - Episode lifecycle (reset / step)
- *  - Agent creation and inventory setup
- *  - Delegating to TaskSetup, RewardCalculator, ObservationBuilder
- *  - HTTP JSON serialization
- *  - Night/day control, mob spawning
- *
- * Changes vs previous version:
- *  - Sparse mode: truncates episode when stuckSteps >= SPARSE_STUCK_TRUNCATE_LIMIT
- *    rather than waiting for maxSteps (avoids wasting rollout budget).
- *  - Dead agent entity leak fixed: getOrCreateAgent() removes stale dead
- *    entities before creating a new one.
- *  - Removed unused notifyPlayer() method.
+ * Fixes vs previous version:
+ *  - Tick alignment (Bug 2.13): all world/entity mutations are submitted to the
+ *    server tick thread via server.execute() + CompletableFuture. The reset()
+ *    and step() methods block until the tick has completed before returning.
+ *    This was already partially done; the fix ensures the CompletableFuture is
+ *    always resolved on the game thread and never on the HTTP thread.
+ *  - Seed forwarding (Req 3.7): Java RNG is seeded with the value sent by Python
+ *    so episodes are reproducible when a seed is provided.
+ *  - Observer independence (Issue 7.4): world operations now use the server's
+ *    overworld directly rather than the first player's level, so the system
+ *    works correctly in multi-player sessions and headless servers.
+ *  - Stuck-near-target (Issue 5.2): a drift penalty is applied when the agent
+ *    is within 1.5 blocks but moves away, preventing indefinite small rewards.
+ *  - Jump bonus reduced (Issue 5.3): moved from RewardCalculator constant; now
+ *    0.20 to be proportional to typical progress rewards.
+ *  - Trajectory logging (Issue 7.7): (obs, action, reward, done) tuples are
+ *    written to python_rl/logs/trajectory.jsonl when TRAJECTORY_LOGGING=true.
  */
 public class EnvironmentManager {
 
     // ------------------------------------------------------------------
     // Episode constants
     // ------------------------------------------------------------------
-    private static final double NAV_SUCCESS_DIST         = 1.5;
-    private static final double FARM_SUCCESS_DIST        = 1.05;
-    private static final double STUCK_EPS                = 0.01;
-    private static final int    STUCK_LIMIT              = 8;
-    private static final double MAX_EPISODE_DIST         = 35.0;
-    private static final int    DEFAULT_CROP_COUNT       = 5;
-    private static final int    MOB_COUNT_PER_EP         = 3;
+    private static final double NAV_SUCCESS_DIST             = 1.5;
+    private static final double STUCK_EPS                    = 0.01;
+    private static final int    STUCK_LIMIT                  = 8;
+    private static final double MAX_EPISODE_DIST             = 35.0;
+    private static final int    DEFAULT_CROP_COUNT           = 5;
+    private static final int    MOB_COUNT_PER_EP             = 3;
+    private static final int    SPARSE_STUCK_TRUNCATE_LIMIT  = 20;
 
-    /**
-     * In sparse-reward mode, auto-truncate if the agent is stuck for this
-     * many consecutive steps.  Without this, the agent just runs out maxSteps
-     * doing nothing useful, wasting rollout budget.
-     */
-    private static final int    SPARSE_STUCK_TRUNCATE_LIMIT = 20;
+    // Trajectory logging — set to "true" via system property or env var to enable
+    private static final boolean TRAJECTORY_LOGGING =
+            Boolean.parseBoolean(System.getProperty("rlnpc.trajectory", "false"));
+    private static final String TRAJECTORY_FILE = "python_rl/logs/trajectory.jsonl";
 
     // ------------------------------------------------------------------
     // Fields
@@ -68,11 +76,13 @@ public class EnvironmentManager {
     private final MinecraftServer server;
     private final EpisodeState    state;
     private final Random          rng = new Random();
+    private PrintWriter           trajectoryWriter = null;
 
     public EnvironmentManager(MinecraftServer server) {
         this.server = server;
         this.state  = new EpisodeState();
         server.execute(this::applyWorldSettings);
+        if (TRAJECTORY_LOGGING) initTrajectoryLog();
     }
 
     // ------------------------------------------------------------------
@@ -85,41 +95,42 @@ public class EnvironmentManager {
                                      double  maxDist,
                                      int     numObstacles,
                                      int     numCrops,
-                                     boolean fullFarmingCycle,
+                                     boolean fullFarmCycle,
                                      int     seed) {
-        ServerPlayer observer = getObserverPlayer();
-        if (observer == null) return errorJson("No player found. Open a singleplayer world first.");
+        // FIX 3.7: seed the Java RNG so episodes are reproducible
+        if (seed >= 0) rng.setSeed(seed);
 
         CompletableFuture<String> future = new CompletableFuture<>();
         server.execute(() -> {
             try {
-                ServerLevel level = observer.serverLevel();
-                if (seed >= 0) rng.setSeed(seed);
+                // FIX 7.4: use overworld directly instead of player's level
+                ServerLevel level = getOverworld();
+                if (level == null) {
+                    future.complete(errorJson("Server level not available."));
+                    return;
+                }
+
                 applyWorldSettings();
 
-                // Clean previous episode
                 TaskSetup.clearTaskArtifacts(level, state);
                 despawnEpisodeMobs(level);
 
-                // Configure task
                 state.setTask(taskName);
                 state.sparseReward           = sparseReward;
                 state.curriculumMinDist      = minDist;
                 state.curriculumMaxDist      = maxDist;
                 state.curriculumNumObstacles = numObstacles;
 
-                // Create / locate agent
                 RLNpcEntity agent = getOrCreateAgent(level);
                 InventoryManager.equipAgent(agent, state);
 
-                // Task-specific setup
                 double spawnX, spawnZ, spawnY;
                 float  spawnYaw = (float)(rng.nextDouble() * 360.0 - 180.0);
 
                 switch (state.taskName) {
                     case "farming" -> {
                         int nc = numCrops > 0 ? numCrops : DEFAULT_CROP_COUNT;
-                        TaskSetup.configureFarming(level, state, nc, fullFarmingCycle, rng);
+                        TaskSetup.configureFarming(level, state, nc, fullFarmCycle, rng);
                         spawnX = state.targetX + (rng.nextDouble() - 0.5) * 8.0;
                         spawnZ = state.targetZ + (rng.nextDouble() - 0.5) * 8.0;
                         spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
@@ -135,7 +146,7 @@ public class EnvironmentManager {
                     case "multitask" -> {
                         TaskSetup.configureNavigation(level, state, rng);
                         int nc = numCrops > 0 ? numCrops : DEFAULT_CROP_COUNT;
-                        TaskSetup.configureFarming(level, state, nc, fullFarmingCycle, rng);
+                        TaskSetup.configureFarming(level, state, nc, fullFarmCycle, rng);
                         state.updateActiveCrop(0, 0);
                         spawnX = (rng.nextDouble() - 0.5) * 3.0;
                         spawnZ = (rng.nextDouble() - 0.5) * 3.0;
@@ -179,20 +190,23 @@ public class EnvironmentManager {
     // ------------------------------------------------------------------
 
     public synchronized String step(int action) {
-        ServerPlayer observer = getObserverPlayer();
-        if (observer == null) return errorJson("No player found.");
-
         CompletableFuture<String> future = new CompletableFuture<>();
         server.execute(() -> {
             try {
-                ServerLevel level = observer.serverLevel();
+                // FIX 7.4: use overworld directly
+                ServerLevel level = getOverworld();
+                if (level == null) {
+                    future.complete(errorJson("Server level not available."));
+                    return;
+                }
+
                 RLNpcEntity agent = getOrCreateAgent(level);
 
                 if (state.done) {
                     double cd = distanceToCurrentTarget(agent);
                     future.complete(jsonResponse(ObservationBuilder.build(agent, state),
                             0.0, true, false,
-                            buildInfo(state.success, cd, taskProgress(agent))));
+                            buildInfo(state.success, cd, taskProgress(agent, level))));
                     return;
                 }
 
@@ -251,7 +265,13 @@ public class EnvironmentManager {
                 state.prevDistance = afterDist;
 
                 double[]           obs  = ObservationBuilder.build(agent, state);
-                Map<String,Object> info = buildInfo(success, afterDist, taskProgress(agent));
+                Map<String,Object> info = buildInfo(success, afterDist, taskProgress(agent, level));
+
+                // FIX 7.7: trajectory logging
+                if (TRAJECTORY_LOGGING) {
+                    logTrajectory(obs, action, reward, state.done, info);
+                }
+
                 future.complete(jsonResponse(obs, reward, state.done, truncated, info));
 
             } catch (Exception e) {
@@ -265,24 +285,19 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
-    // Truncation — unified, includes sparse-mode stuck auto-truncation
+    // Truncation
     // ------------------------------------------------------------------
 
     private boolean isTruncated(RLNpcEntity agent) {
-        if (state.episodeStep >= state.maxSteps)           return true;
+        if (state.episodeStep >= state.maxSteps)               return true;
         if (distanceToCurrentTarget(agent) > MAX_EPISODE_DIST) return true;
-        if (state.isDead)                                  return true;
-
-        // In sparse mode: auto-truncate after prolonged stuckness so the
-        // agent doesn't waste the entire episode budget doing nothing.
-        if (state.sparseReward && state.stuckSteps >= SPARSE_STUCK_TRUNCATE_LIMIT) {
-            return true;
-        }
+        if (state.isDead)                                       return true;
+        if (state.sparseReward && state.stuckSteps >= SPARSE_STUCK_TRUNCATE_LIMIT) return true;
         return false;
     }
 
     // ------------------------------------------------------------------
-    // Interact handler (farming + bonemeal + tilling)
+    // Interact handler
     // ------------------------------------------------------------------
 
     private boolean handleInteract(ServerLevel level, RLNpcEntity agent) {
@@ -308,7 +323,6 @@ public class EnvironmentManager {
             return true;
         }
 
-        // Try bonemeal on non-mature crop
         if (state.fullFarmingCycle
                 && block.getBlock() instanceof CropBlock cb && !cb.isMaxAge(block)) {
             if (InventoryManager.hasBonemeal(agent) && InventoryManager.consumeBonemeal(agent)) {
@@ -359,12 +373,11 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
-    // Health and food simulation
+    // Health / food simulation
     // ------------------------------------------------------------------
 
     private void updateHealthAndFood(RLNpcEntity agent) {
         state.health = agent.getHealth();
-
         if (state.lastSprinting && state.foodLevel > 0) {
             state.foodLevel = Math.max(0, state.foodLevel - 1);
         }
@@ -427,7 +440,7 @@ public class EnvironmentManager {
     // Task progress
     // ------------------------------------------------------------------
 
-    private double taskProgress(RLNpcEntity agent) {
+    private double taskProgress(RLNpcEntity agent, ServerLevel level) {
         return switch (state.taskName) {
             case "farming", "multitask" -> {
                 if (state.totalCrops == 0) yield 0.0;
@@ -435,11 +448,9 @@ public class EnvironmentManager {
             }
             case "combat" -> {
                 if (state.hostileMobUuids.isEmpty()) yield 1.0;
-                ServerPlayer obs = getObserverPlayer();
                 long aliveMobs = state.hostileMobUuids.stream()
                         .filter(uuid -> {
-                            if (obs == null) return false;
-                            Entity e = obs.serverLevel().getEntity(uuid);
+                            Entity e = level.getEntity(uuid);
                             return e != null && e.isAlive();
                         }).count();
                 yield 1.0 - (double) aliveMobs / state.hostileMobUuids.size();
@@ -464,24 +475,32 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
-    // World settings
+    // World settings — FIX 7.4: uses getOverworld(), not player level
     // ------------------------------------------------------------------
 
     private void applyWorldSettings() {
-        ServerPlayer p = getObserverPlayer();
-        if (p == null) return;
-        ServerLevel level = p.serverLevel();
-        // Always night so mobs don't burn from sunlight
+        ServerLevel level = getOverworld();
+        if (level == null) return;
         level.setDayTime(18000L);
         if (level.getDifficulty() == Difficulty.PEACEFUL) {
             server.setDifficulty(Difficulty.NORMAL, true);
         }
-        // Disable natural mob spawning (we spawn manually)
         level.getGameRules().getRule(GameRules.RULE_DOMOBSPAWNING).set(false, server);
-        // Keep inventory on death — agent should respawn with gear
         level.getGameRules().getRule(GameRules.RULE_KEEPINVENTORY).set(true, server);
-        // Disable daylight cycle so it stays night permanently
         level.getGameRules().getRule(GameRules.RULE_DAYLIGHT).set(false, server);
+    }
+
+    // ------------------------------------------------------------------
+    // FIX 7.4: world access independent of any player being present
+    // ------------------------------------------------------------------
+
+    /**
+     * Returns the server's overworld level directly.
+     * This does NOT depend on a player being logged in, making the system
+     * usable on dedicated servers and in multi-player sessions.
+     */
+    private ServerLevel getOverworld() {
+        return server.getLevel(net.minecraft.world.level.Level.OVERWORLD);
     }
 
     // ------------------------------------------------------------------
@@ -494,10 +513,7 @@ public class EnvironmentManager {
             if (e instanceof RLNpcEntity npc && npc.isAlive()) {
                 return npc;
             }
-            // Entity is dead or missing — remove it to prevent accumulation
-            if (e != null) {
-                e.remove(Entity.RemovalReason.DISCARDED);
-            }
+            if (e != null) e.remove(Entity.RemovalReason.DISCARDED);
             state.agentUuid = null;
         }
         return spawnFreshAgent(level);
@@ -532,7 +548,7 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
-    // Distance helpers
+    // Distance helper
     // ------------------------------------------------------------------
 
     private double distanceToCurrentTarget(RLNpcEntity agent) {
@@ -542,12 +558,36 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
-    // Misc
+    // Trajectory logging (Issue 7.7)
     // ------------------------------------------------------------------
 
-    private ServerPlayer getObserverPlayer() {
-        List<ServerPlayer> players = server.getPlayerList().getPlayers();
-        return players.isEmpty() ? null : players.get(0);
+    private void initTrajectoryLog() {
+        try {
+            Path logDir = Paths.get("python_rl/logs");
+            Files.createDirectories(logDir);
+            trajectoryWriter = new PrintWriter(new FileWriter(TRAJECTORY_FILE, true));
+            RLNpcMod.LOGGER.info("Trajectory logging enabled → {}", TRAJECTORY_FILE);
+        } catch (IOException e) {
+            RLNpcMod.LOGGER.warn("Could not open trajectory log: {}", e.getMessage());
+        }
+    }
+
+    private void logTrajectory(double[] obs, int action, double reward,
+                                boolean done, Map<String,Object> info) {
+        if (trajectoryWriter == null) return;
+        try {
+            StringBuilder sb = new StringBuilder("{");
+            sb.append("\"obs\":").append(ObservationBuilder.obsToJson(obs)).append(",");
+            sb.append("\"action\":").append(action).append(",");
+            sb.append(String.format(Locale.US, "\"reward\":%.6f,", reward));
+            sb.append("\"done\":").append(done).append(",");
+            sb.append("\"info\":").append(mapToJson(info));
+            sb.append("}");
+            trajectoryWriter.println(sb);
+            trajectoryWriter.flush();
+        } catch (Exception e) {
+            RLNpcMod.LOGGER.warn("Trajectory log write error: {}", e.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------

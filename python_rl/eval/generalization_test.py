@@ -4,7 +4,7 @@ generalization_test.py
 Tests trained models on held-out difficulty configurations.
 
 Navigation configs (A–F): vary distance and obstacle count.
-Farming configs (G–J): vary crop count and farming cycle complexity.
+Farming configs (G–K):    vary crop count and farming cycle complexity. ← NEW (Req 1.9)
 
 Usage
 -----
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
+from typing import Any, Dict, List
 
 import matplotlib
 matplotlib.use("Agg")
@@ -36,7 +37,7 @@ PLOTS_DIR = LOGS_DIR / "plots"
 # Navigation hold-out configs
 # ------------------------------------------------------------------
 
-NAV_CONFIGS = [
+NAV_CONFIGS: List[Dict[str, Any]] = [
     {"id": "A", "label": "Short flat\n(3–6b, 0obs)",
      "min_dist": 3.0,  "max_dist": 6.0,  "num_obstacles": 0, "task": "navigation"},
     {"id": "B", "label": "Medium 1obs\n(5–9b, 1obs)",
@@ -52,10 +53,10 @@ NAV_CONFIGS = [
 ]
 
 # ------------------------------------------------------------------
-# Farming hold-out configs
+# Farming hold-out configs (Req 1.9 — was missing)
 # ------------------------------------------------------------------
 
-FARMING_CONFIGS = [
+FARMING_CONFIGS: List[Dict[str, Any]] = [
     {"id": "G", "label": "1 crop\nharvest-only",
      "num_crops": 1,  "full_farm_cycle": False, "task": "farming"},
     {"id": "H", "label": "3 crops\nharvest-only",
@@ -66,6 +67,11 @@ FARMING_CONFIGS = [
      "num_crops": 5,  "full_farm_cycle": True,  "task": "farming"},
     {"id": "K", "label": "10 crops\nharvest-only",
      "num_crops": 10, "full_farm_cycle": False, "task": "farming"},
+    # Additional held-out configs not seen during training
+    {"id": "L", "label": "7 crops\nharvest-only",
+     "num_crops": 7,  "full_farm_cycle": False, "task": "farming"},
+    {"id": "M", "label": "3 crops\nfull cycle",
+     "num_crops": 3,  "full_farm_cycle": True,  "task": "farming"},
 ]
 
 
@@ -73,33 +79,46 @@ FARMING_CONFIGS = [
 # Evaluation helper
 # ------------------------------------------------------------------
 
-def evaluate_config(model: PPO, config: dict, n_episodes: int = 20) -> dict:
+def evaluate_config(
+    model:      PPO,
+    config:     Dict[str, Any],
+    n_episodes: int = 20,
+) -> Dict[str, Any]:
     """Run n_episodes with the given config and return aggregate stats."""
-    task = config["task"]
-    num_crops       = config.get("num_crops", 5)
-    full_farm_cycle = config.get("full_farm_cycle", False)
+    task:            str  = config["task"]
+    num_crops:       int  = config.get("num_crops", 5)
+    full_farm_cycle: bool = config.get("full_farm_cycle", False)
 
     env = MinecraftEnv(task=task, num_crops=num_crops, full_farm_cycle=full_farm_cycle)
-    reset_opts = {k: v for k, v in config.items()
-                  if k not in ("id", "label", "task")}
+    reset_opts: Dict[str, Any] = {
+        k: v for k, v in config.items()
+        if k not in ("id", "label", "task")
+    }
     reset_opts["task"] = task
 
-    successes = 0; total_reward = 0.0; total_steps = 0; total_crops = 0
+    successes: int   = 0
+    total_reward:  float = 0.0
+    total_steps:   int   = 0
+    total_crops:   int   = 0
+    total_mobs:    int   = 0
 
     for _ in range(n_episodes):
         obs, _ = env.reset(options=reset_opts)
         done = truncated = False
-        ep_reward = 0.0; ep_steps = 0
+        ep_reward: float = 0.0
+        ep_steps:  int   = 0
 
         while not done and not truncated:
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, truncated, info = env.step(action)
-            ep_reward += reward; ep_steps += 1
+            ep_reward += reward
+            ep_steps  += 1
 
         successes    += int(info.get("success", False))
         total_reward += ep_reward
         total_steps  += ep_steps
         total_crops  += info.get("crops_harvested", 0)
+        total_mobs   += info.get("mobs_killed", 0)
 
     env.close()
     return {
@@ -108,10 +127,11 @@ def evaluate_config(model: PPO, config: dict, n_episodes: int = 20) -> dict:
         "task":         task,
         "success_rate": round(successes / n_episodes, 3),
         "avg_reward":   round(total_reward / n_episodes, 3),
-        "avg_steps":    round(total_steps / n_episodes, 1),
-        "avg_crops":    round(total_crops / n_episodes, 2),
+        "avg_steps":    round(total_steps  / n_episodes, 1),
+        "avg_crops":    round(total_crops  / n_episodes, 2),
+        "avg_mobs":     round(total_mobs   / n_episodes, 2),
         "n_episodes":   n_episodes,
-        "train_dist":   config.get("id") in ("C", "I"),   # highlight training distributions
+        "train_dist":   config.get("id") in ("C", "I"),
     }
 
 
@@ -119,11 +139,15 @@ def evaluate_config(model: PPO, config: dict, n_episodes: int = 20) -> dict:
 # Reporting
 # ------------------------------------------------------------------
 
-def save_csv(results: list[dict], model_name: str, suffix: str = "") -> Path:
+def save_csv(
+    results: List[Dict[str, Any]],
+    model_name: str,
+    suffix: str = "",
+) -> Path:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     out = LOGS_DIR / f"generalization_{model_name}{suffix}.csv"
     fields = ["id", "label", "task", "success_rate",
-              "avg_reward", "avg_steps", "avg_crops", "n_episodes"]
+              "avg_reward", "avg_steps", "avg_crops", "avg_mobs", "n_episodes"]
     with out.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -132,7 +156,11 @@ def save_csv(results: list[dict], model_name: str, suffix: str = "") -> Path:
     return out
 
 
-def plot_results(results: list[dict], model_name: str, suffix: str = "") -> None:
+def plot_results(
+    results:    List[Dict[str, Any]],
+    model_name: str,
+    suffix:     str = "",
+) -> None:
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     labels = [r["label"]        for r in results]
     srs    = [r["success_rate"] for r in results]
@@ -143,7 +171,6 @@ def plot_results(results: list[dict], model_name: str, suffix: str = "") -> None
     for bar, sr in zip(bars, srs):
         ax.text(bar.get_x() + bar.get_width() / 2, sr + 0.015,
                 f"{sr:.2f}", ha="center", va="bottom", fontsize=9)
-
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylim(0, 1.15)
@@ -151,7 +178,6 @@ def plot_results(results: list[dict], model_name: str, suffix: str = "") -> None
     ax.set_ylabel("Success Rate")
     ax.set_title(f"Generalization Test — {model_name}\n(blue = training distribution)")
     ax.legend(); plt.tight_layout()
-
     out = PLOTS_DIR / f"generalization_{model_name}{suffix}.png"
     plt.savefig(out, dpi=150); plt.close()
     print(f"  Plot saved: {out}")
@@ -175,7 +201,7 @@ def main() -> None:
 
     if args.task in ("navigation", "both"):
         print(f"\nNavigation generalization ({len(NAV_CONFIGS)} configs × {args.episodes} eps)\n")
-        nav_results = []
+        nav_results: List[Dict[str, Any]] = []
         for cfg in NAV_CONFIGS:
             print(f"  Config {cfg['id']}: {cfg['label'].replace(chr(10), ' ')} … ",
                   end="", flush=True)
@@ -184,14 +210,13 @@ def main() -> None:
             print(f"SR={stats['success_rate']:.2f}  "
                   f"avgR={stats['avg_reward']:.1f}  "
                   f"steps={stats['avg_steps']:.0f}")
-
         csv_out = save_csv(nav_results, args.model, "_nav")
         print(f"\nCSV: {csv_out}")
         plot_results(nav_results, args.model, "_nav")
 
     if args.task in ("farming", "both"):
         print(f"\nFarming generalization ({len(FARMING_CONFIGS)} configs × {args.episodes} eps)\n")
-        farm_results = []
+        farm_results: List[Dict[str, Any]] = []
         for cfg in FARMING_CONFIGS:
             print(f"  Config {cfg['id']}: {cfg['label'].replace(chr(10), ' ')} … ",
                   end="", flush=True)
@@ -200,7 +225,6 @@ def main() -> None:
             print(f"SR={stats['success_rate']:.2f}  "
                   f"crops={stats['avg_crops']:.1f}  "
                   f"steps={stats['avg_steps']:.0f}")
-
         csv_out = save_csv(farm_results, args.model, "_farm")
         print(f"\nCSV: {csv_out}")
         plot_results(farm_results, args.model, "_farm")

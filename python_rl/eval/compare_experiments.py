@@ -1,32 +1,30 @@
 """
 compare_experiments.py
 ----------------------
-Generates comparison plots for the key experiments:
+Generates comparison plots for the key experiments.
 
+Plots generated:
   1. Shaped vs Sparse rewards  (navigation)
   2. Curriculum vs No-curriculum  (navigation)
   3. Multi-task vs Single-task overview
   4. Final success-rate bar chart (all experiments)
+  5. Farming generalization (if farm_success.csv present)  ← new (Issue 1.9)
 
 Usage
 -----
     python -m python_rl.eval.compare_experiments
+    python -m python_rl.eval.compare_experiments --last-n 200 --window 30
 
-All monitor / success CSVs are loaded from python_rl/logs/.
-Missing files are gracefully skipped with a warning.
-
-Bugs fixed vs previous version
+Bugs fixed vs original version
 -------------------------------
-* Monitor CSV for multitask was wrong ("multitask_day2_playernpc_monitor.csv"
-  → "multitask_monitor.csv").
-* Level-advancement marker logic now checks ALL episodes for level changes
-  instead of filtering on success==1, which caused markers to be misplaced.
+* Monitor CSV for multitask was wrong → fixed to "multitask_monitor.csv"
+* Level-advancement marker now checks ALL episodes (not just success==1)
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -58,15 +56,15 @@ def load_success(filename: str) -> Optional[pd.DataFrame]:
     return pd.read_csv(p)
 
 
-def moving_average(values, window: int) -> np.ndarray:
-    """Uniform moving average. Replaces the former smooth() and rolling_sr()."""
+def moving_average(values: List[float], window: int) -> np.ndarray:
     arr = np.array(values, dtype=float)
     if len(arr) < window:
         return arr
     return np.convolve(arr, np.ones(window) / window, mode="valid")
 
 
-def final_success_rate(success_file: str, last_n: int = 100) -> float:
+def final_success_rate(success_file: str, last_n: int) -> float:
+    """Issue 8.4: last_n is now a required parameter, not hardcoded."""
     df = load_success(success_file)
     if df is None or len(df) == 0:
         return float("nan")
@@ -78,7 +76,7 @@ def final_success_rate(success_file: str, last_n: int = 100) -> float:
 # Plot helpers
 # ------------------------------------------------------------------
 
-def plot_comparison(ax_reward, ax_success, runs, window=20):
+def plot_comparison(ax_reward, ax_success, runs: list, window: int = 20) -> None:
     for run in runs:
         label = run["label"]
         color = run.get("color", None)
@@ -112,19 +110,15 @@ def plot_shaped_vs_sparse(window: int = 20) -> None:
         {"label": "Sparse reward", "monitor_csv": "nav_sparse_monitor.csv",
          "success_csv": "nav_sparse_success.csv", "color": "darkorange"},
     ]
-
     fig, (ax_r, ax_s) = plt.subplots(1, 2, figsize=(14, 5))
     plot_comparison(ax_r, ax_s, runs, window)
-
     ax_r.set_xlabel("Episode"); ax_r.set_ylabel("Episode Reward")
     ax_r.set_title("Navigation: Shaped vs Sparse — Reward"); ax_r.legend()
-
     ax_s.set_xlabel("Episode"); ax_s.set_ylabel("Rolling Success Rate")
     ax_s.set_title("Navigation: Shaped vs Sparse — Success Rate")
     ax_s.set_ylim(-0.05, 1.05)
     ax_s.axhline(0.7, linestyle="--", color="gray", linewidth=1)
     ax_s.legend()
-
     plt.tight_layout()
     out = PLOTS_DIR / "shaped_vs_sparse.png"
     plt.savefig(out, dpi=150); plt.close()
@@ -143,11 +137,10 @@ def plot_curriculum_vs_nocurriculum(window: int = 20) -> None:
         {"label": "No curriculum (shaped)", "monitor_csv": "nav_shaped_monitor.csv",
          "success_csv": "nav_shaped_success.csv",    "color": "steelblue"},
     ]
-
     fig, (ax_r, ax_s) = plt.subplots(1, 2, figsize=(14, 5))
     plot_comparison(ax_r, ax_s, runs, window)
 
-    # FIX: overlay level-advancement markers on ALL episodes, not just successes
+    # FIX: level-advancement markers on ALL episodes, not just success==1
     level_csv = LOGS_DIR / "nav_curriculum_levels.csv"
     if level_csv.exists():
         df_lv = pd.read_csv(level_csv)
@@ -165,13 +158,11 @@ def plot_curriculum_vs_nocurriculum(window: int = 20) -> None:
 
     ax_r.set_xlabel("Episode"); ax_r.set_ylabel("Episode Reward")
     ax_r.set_title("Navigation: Curriculum vs No Curriculum — Reward"); ax_r.legend()
-
     ax_s.set_xlabel("Episode"); ax_s.set_ylabel("Rolling Success Rate")
     ax_s.set_title("Navigation: Curriculum vs No Curriculum — Success Rate")
     ax_s.set_ylim(-0.05, 1.05)
     ax_s.axhline(0.7, linestyle="--", color="gray", linewidth=1)
     ax_s.legend()
-
     plt.tight_layout()
     out = PLOTS_DIR / "curriculum_vs_nocurriculum.png"
     plt.savefig(out, dpi=150); plt.close()
@@ -185,7 +176,6 @@ def plot_curriculum_vs_nocurriculum(window: int = 20) -> None:
 def plot_multitask_overview(window: int = 20) -> None:
     print("Plotting: multi-task overview …")
     runs = [
-        # FIX: correct CSV name (was "multitask_day2_playernpc_monitor.csv")
         {"label": "Multi-task (combined ep)", "monitor_csv": "multitask_monitor.csv",
          "success_csv": "multitask_success.csv", "color": "crimson"},
         {"label": "Navigation only", "monitor_csv": "nav_shaped_monitor.csv",
@@ -195,17 +185,13 @@ def plot_multitask_overview(window: int = 20) -> None:
         {"label": "Combat only",     "monitor_csv": "combat_monitor.csv",
          "success_csv": "combat_success.csv",     "color": "darkorange"},
     ]
-
     fig, (ax_r, ax_s) = plt.subplots(1, 2, figsize=(14, 5))
     plot_comparison(ax_r, ax_s, runs, window)
-
     ax_r.set_xlabel("Episode"); ax_r.set_ylabel("Episode Reward")
     ax_r.set_title("Multi-task vs Single-task — Reward"); ax_r.legend()
-
     ax_s.set_xlabel("Episode"); ax_s.set_ylabel("Rolling Success Rate")
     ax_s.set_title("Multi-task vs Single-task — Success Rate")
     ax_s.set_ylim(-0.05, 1.05); ax_s.legend()
-
     plt.tight_layout()
     out = PLOTS_DIR / "multitask_overview.png"
     plt.savefig(out, dpi=150); plt.close()
@@ -213,11 +199,11 @@ def plot_multitask_overview(window: int = 20) -> None:
 
 
 # ------------------------------------------------------------------
-# Final success bar chart
+# Final success bar chart — Issue 8.4: last_n is configurable
 # ------------------------------------------------------------------
 
-def plot_final_success_bar(last_n: int = 100) -> None:
-    print("Plotting: final success-rate bar chart …")
+def plot_final_success_bar(last_n: int) -> None:
+    print(f"Plotting: final success-rate bar chart (last {last_n} eps) …")
     experiments = [
         ("Nav shaped",      "nav_shaped_success.csv"),
         ("Nav sparse",      "nav_sparse_success.csv"),
@@ -226,7 +212,6 @@ def plot_final_success_bar(last_n: int = 100) -> None:
         ("Combat",          "combat_success.csv"),
         ("Multi-task",      "multitask_success.csv"),
     ]
-
     labels, rates = [], []
     for label, csv_name in experiments:
         sr = final_success_rate(csv_name, last_n=last_n)
@@ -240,7 +225,6 @@ def plot_final_success_bar(last_n: int = 100) -> None:
     labels_v, rates_v = zip(*valid)
     colors = ["steelblue", "darkorange", "seagreen",
               "mediumpurple", "crimson", "saddlebrown"]
-
     fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.bar(labels_v, rates_v,
                   color=colors[:len(labels_v)], edgecolor="white", linewidth=0.8)
@@ -258,6 +242,46 @@ def plot_final_success_bar(last_n: int = 100) -> None:
 
 
 # ------------------------------------------------------------------
+# NEW: Farming generalization summary (Issue 1.9)
+# ------------------------------------------------------------------
+
+def plot_farming_generalization(window: int = 20) -> None:
+    """
+    Plot farming success-rate curves across curriculum levels if available.
+    This is the summary companion to generalization_test.py --task farming.
+    """
+    print("Plotting: farming generalization overview …")
+    runs = [
+        {"label": "Farming (harvest-only)",   "monitor_csv": "farm_monitor.csv",
+         "success_csv": "farm_success.csv",   "color": "mediumpurple"},
+        {"label": "Farming (full cycle)",
+         "monitor_csv": "farm_fullcycle_monitor.csv",
+         "success_csv": "farm_fullcycle_success.csv", "color": "darkorchid"},
+    ]
+    # Check if any of these files exist before creating the figure
+    has_data = any(
+        (LOGS_DIR / r["success_csv"]).exists() for r in runs
+    )
+    if not has_data:
+        print("  No farming generalization CSVs found — skipping.")
+        return
+
+    fig, (ax_r, ax_s) = plt.subplots(1, 2, figsize=(14, 5))
+    plot_comparison(ax_r, ax_s, runs, window)
+    ax_r.set_xlabel("Episode"); ax_r.set_ylabel("Episode Reward")
+    ax_r.set_title("Farming: Harvest-only vs Full Cycle — Reward"); ax_r.legend()
+    ax_s.set_xlabel("Episode"); ax_s.set_ylabel("Rolling Success Rate")
+    ax_s.set_title("Farming: Harvest-only vs Full Cycle — Success Rate")
+    ax_s.set_ylim(-0.05, 1.05)
+    ax_s.axhline(0.7, linestyle="--", color="gray", linewidth=1)
+    ax_s.legend()
+    plt.tight_layout()
+    out = PLOTS_DIR / "farming_generalization.png"
+    plt.savefig(out, dpi=150); plt.close()
+    print(f"  Saved: {out}")
+
+
+# ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
 
@@ -265,10 +289,9 @@ def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="Generate comparison plots.")
     parser.add_argument("--last-n", type=int, default=100,
-                        help="Episodes to average for the final success-rate bar chart "
-                             "(default: 100).  Increase for longer training runs.")
+                        help="Episodes to average for the final success-rate bar chart.")
     parser.add_argument("--window", type=int, default=20,
-                        help="Smoothing window in episodes for all curves (default: 20).")
+                        help="Smoothing window in episodes (default: 20).")
     args = parser.parse_args()
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -277,6 +300,7 @@ def main() -> None:
     plot_curriculum_vs_nocurriculum(window=args.window)
     plot_multitask_overview(window=args.window)
     plot_final_success_bar(last_n=args.last_n)
+    plot_farming_generalization(window=args.window)
     print("=== Done ===")
     print(f"All plots saved to: {PLOTS_DIR}/")
 

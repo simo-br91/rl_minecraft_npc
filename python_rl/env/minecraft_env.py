@@ -18,17 +18,18 @@ Action Space (13 discrete actions):
    11  eat         (consume cooked beef from inventory)
    12  switch_item (cycle active hotbar slot)
 
-Observation Space (28 dims) — see ObservationBuilder.java for full docs.
+Observation Space (104 dims) — see ObservationBuilder.java for full layout.
+  Indices  0-28: hand-crafted features (nav, task, farming, combat, obstacles)
+  Indices 29-103: local 5×3×5 voxel grid (solid=1, passable=0)
 
-Fixes applied vs previous version
-----------------------------------
-* obs_space high bound for task_id was 10 (should be 1); all bounds verified.
-* close() sends a proper cleanup reset so leftover markers/NPCs don't remain.
-* render() is properly implemented as a no-op with the correct signature.
-* Seed is forwarded to the Java bridge so episode randomisation is
-  reproducible when a seed is provided.
-* sample_tasks uses the seeded _np_random rng (was accidentally using global
-  numpy random state).
+Fixes vs previous version
+--------------------------
+* sample_tasks now uses the gymnasium-seeded internal RNG (_np_random) so
+  task sampling is reproducible when a seed is passed to reset().
+  (Bug 6.7 — was using numpy global random state)
+* Full type annotations added throughout. (Issue 8.1)
+* OBS_DIM updated to 104 to include the voxel grid. (Req 1.1)
+* Seed is forwarded to the Java bridge for reproducible Java RNG. (Req 3.7)
 """
 
 from __future__ import annotations
@@ -43,21 +44,21 @@ from gymnasium import spaces
 
 
 # Named action indices for readability
-ACTION_FORWARD     = 0
-ACTION_TURN_LEFT   = 1
-ACTION_TURN_RIGHT  = 2
-ACTION_INTERACT    = 3
-ACTION_NOOP        = 4
-ACTION_JUMP        = 5
-ACTION_SPRINT      = 6
-ACTION_BACKWARD    = 7
-ACTION_STRAFE_LEFT = 8
-ACTION_STRAFE_RIGHT= 9
-ACTION_ATTACK      = 10
-ACTION_EAT         = 11
-ACTION_SWITCH_ITEM = 12
+ACTION_FORWARD      = 0
+ACTION_TURN_LEFT    = 1
+ACTION_TURN_RIGHT   = 2
+ACTION_INTERACT     = 3
+ACTION_NOOP         = 4
+ACTION_JUMP         = 5
+ACTION_SPRINT       = 6
+ACTION_BACKWARD     = 7
+ACTION_STRAFE_LEFT  = 8
+ACTION_STRAFE_RIGHT = 9
+ACTION_ATTACK       = 10
+ACTION_EAT          = 11
+ACTION_SWITCH_ITEM  = 12
 
-OBS_DIM = 29
+OBS_DIM = 104   # 29 hand-crafted + 75 voxel grid (5×3×5)
 
 
 class MinecraftEnv(gym.Env):
@@ -73,7 +74,7 @@ class MinecraftEnv(gym.Env):
         One of: "navigation", "farming", "combat", "multitask".
     sample_tasks : list[str] | None
         If set, task is sampled from this list each reset.
-        Sampling uses the seeded internal RNG.
+        Uses the seeded internal RNG — reproducible when seed is passed.
     num_crops : int
         Default number of wheat plots for farming episodes (1–10).
     full_farm_cycle : bool
@@ -94,38 +95,33 @@ class MinecraftEnv(gym.Env):
         retry_attempts:  int                  = 3,
     ) -> None:
         super().__init__()
-        self.base_url        = base_url
-        self.fixed_task      = task
-        self.sample_tasks    = sample_tasks
-        self.num_crops       = num_crops
-        self.full_farm_cycle = full_farm_cycle
-        self.retry_attempts  = retry_attempts
-        self._np_random      = np.random.default_rng()
+        self.base_url:        str                 = base_url
+        self.fixed_task:      str                 = task
+        self.sample_tasks:    Optional[List[str]] = sample_tasks
+        self.num_crops:       int                 = num_crops
+        self.full_farm_cycle: bool                = full_farm_cycle
+        self.retry_attempts:  int                 = retry_attempts
+        # Internal RNG — seeded via reset(seed=...) for reproducibility
+        self._np_random: np.random.Generator = np.random.default_rng()
 
         # 13 discrete actions
-        self.action_space = spaces.Discrete(13)
+        self.action_space: spaces.Discrete = spaces.Discrete(13)
 
-        # 28-dim observation — all elements in [-1, 1] or [0, 1].
-        # Index reference (must match ObservationBuilder.java):
-        #  0  dx_norm          1  dz_norm         2  distance_norm
-        #  3  angle_to_target  4  yaw_norm         5  pitch_norm
-        #  6  blocked_front    7  on_ground        8  stuck_norm
-        #  9  task_id_norm    10  crop_in_front   11  near_crop
-        # 12  obstacle_1block 13  health_norm     14  food_norm
-        # 15  mob_nearby      16  mob_dist_norm   17  mob_angle
-        # 18  active_slot_norm 19 holding_sword   20  holding_food
-        # 21  crops_remaining 22  block_N         23  block_E
-        # 24  block_S         25  block_W         26  farmland_ahead
-        # 27  has_seed        28  height_above_gnd
+        # 104-dim observation vector — indices 0-28 hand-crafted, 29-103 voxel grid
+        # All elements normalised to [-1, 1] or [0, 1].
         low  = np.array(
-            [-1,-1, 0,-1,-1,-1, 0,0,0,0, 0,0,0, 0,0, 0,0,-1, 0,0,0, 0, 0,0,0,0, 0,0, 0],
-            dtype=np.float32)
-        high = np.array(
-            [ 1, 1, 1, 1, 1, 1, 1,1,1,1, 1,1,1, 1,1, 1,1, 1, 1,1,1, 1, 1,1,1,1, 1,1, 1],
-            dtype=np.float32)
-        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+            # 0    1    2    3    4    5    6  7  8  9   10  11  12  13  14
+            [-1., -1.,  0., -1., -1., -1.,  0.,0.,0.,0., 0., 0., 0., 0., 0.,
+            # 15   16   17   18   19   20   21  22  23  24  25  26  27  28
+              0.,  0.,  0.,  0.,  0.,  0., -1., 0., 0., 0., 0., 0., 0., 0.]
+            + [0.] * 75,   # voxel grid
+            dtype=np.float32,
+        )
+        high = np.ones(OBS_DIM, dtype=np.float32)
+        self.observation_space: spaces.Box = spaces.Box(
+            low=low, high=high, dtype=np.float32
+        )
 
-        # Validate server is reachable before anything else
         self._wait_for_server()
 
     # ------------------------------------------------------------------
@@ -136,19 +132,20 @@ class MinecraftEnv(gym.Env):
         self,
         seed:    Optional[int]            = None,
         options: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[np.ndarray, Dict]:
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         super().reset(seed=seed)
         if seed is not None:
+            # FIX 6.7: seed the internal RNG used by _choose_task
             self._np_random = np.random.default_rng(seed)
 
-        opts = options or {}
-        task            = opts.get("task",           self._choose_task())
-        sparse_reward   = bool(opts.get("sparse_reward",   False))
-        min_dist        = float(opts.get("min_dist",       -1.0))
-        max_dist        = float(opts.get("max_dist",       -1.0))
-        num_obstacles   = int(opts.get("num_obstacles",    -1))
-        num_crops       = int(opts.get("num_crops",        self.num_crops))
-        full_farm_cycle = bool(opts.get("full_farm_cycle", self.full_farm_cycle))
+        opts: Dict[str, Any] = options or {}
+        task:            str   = opts.get("task",           self._choose_task())
+        sparse_reward:   bool  = bool(opts.get("sparse_reward",   False))
+        min_dist:        float = float(opts.get("min_dist",       -1.0))
+        max_dist:        float = float(opts.get("max_dist",       -1.0))
+        num_obstacles:   int   = int(opts.get("num_obstacles",    -1))
+        num_crops:       int   = int(opts.get("num_crops",        self.num_crops))
+        full_farm_cycle: bool  = bool(opts.get("full_farm_cycle", self.full_farm_cycle))
 
         payload: Dict[str, Any] = {
             "task":            task,
@@ -156,7 +153,7 @@ class MinecraftEnv(gym.Env):
             "num_crops":       num_crops,
             "full_farm_cycle": full_farm_cycle,
         }
-        # Forward seed so Java RNG is deterministic when provided
+        # FIX 3.7: forward seed to Java bridge for reproducible RNG
         if seed is not None:
             payload["seed"] = seed
         if min_dist >= 0:
@@ -170,26 +167,34 @@ class MinecraftEnv(gym.Env):
         if "error" in data:
             raise RuntimeError(data["error"])
 
-        obs  = np.clip(np.array(data["obs"], dtype=np.float32),
-                       self.observation_space.low, self.observation_space.high)
-        info = data.get("info", {})
+        obs  = np.clip(
+            np.array(data["obs"], dtype=np.float32),
+            self.observation_space.low,
+            self.observation_space.high,
+        )
+        info: Dict[str, Any] = data.get("info", {})
         return obs, info
 
     # ------------------------------------------------------------------
     # step()
     # ------------------------------------------------------------------
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+    def step(
+        self, action: int
+    ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         data = self._post("/step", {"action": int(action)}, timeout=10)
         if "error" in data:
             raise RuntimeError(data["error"])
 
-        obs       = np.clip(np.array(data["obs"], dtype=np.float32),
-                            self.observation_space.low, self.observation_space.high)
-        reward    = float(data["reward"])
-        done      = bool(data["done"])
-        truncated = bool(data["truncated"])
-        info      = data.get("info", {})
+        obs       = np.clip(
+            np.array(data["obs"], dtype=np.float32),
+            self.observation_space.low,
+            self.observation_space.high,
+        )
+        reward:    float             = float(data["reward"])
+        done:      bool              = bool(data["done"])
+        truncated: bool              = bool(data["truncated"])
+        info:      Dict[str, Any]    = data.get("info", {})
         return obs, reward, done, truncated, info
 
     # ------------------------------------------------------------------
@@ -197,22 +202,15 @@ class MinecraftEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def render(self) -> None:
-        """
-        No-op.  The Minecraft client window is the renderer.
-        render_mode="human" is implicitly satisfied by Minecraft being open.
-        """
+        """No-op. The Minecraft client window is the renderer."""
         pass
 
     # ------------------------------------------------------------------
-    # close() — send a cleanup reset to leave Minecraft in a clean state
+    # close()
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """
-        Send a cleanup /reset so Minecraft removes the NPC markers and
-        leftover blocks from the last episode.  Swallows all errors —
-        Minecraft may already be closed.
-        """
+        """Send a cleanup reset so Minecraft removes NPC markers."""
         try:
             self._post(
                 "/reset",
@@ -229,13 +227,19 @@ class MinecraftEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _choose_task(self) -> str:
+        """
+        Return the task name for the next episode.
+        FIX 6.7: uses the seeded internal RNG (_np_random) instead of
+        numpy's global random state, so task sampling is reproducible.
+        """
         if self.sample_tasks:
-            # Use the seeded internal RNG — reproducible when seed is set
             idx = int(self._np_random.integers(0, len(self.sample_tasks)))
             return str(self.sample_tasks[idx])
         return self.fixed_task
 
-    def _post(self, path: str, payload: Dict, timeout: float = 10) -> Dict:
+    def _post(
+        self, path: str, payload: Dict[str, Any], timeout: float = 10
+    ) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
         last_exc: Optional[Exception] = None
         for attempt in range(self.retry_attempts):
