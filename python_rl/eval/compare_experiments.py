@@ -148,13 +148,14 @@ def plot_curriculum_vs_nocurriculum(window: int = 20) -> None:
             prev = None
             for idx, row in df_lv.iterrows():
                 lv = int(row["level"])
-                if prev is not None and lv != prev:
-                    ax_r.axvline(idx, linestyle=":", color="seagreen",
-                                 alpha=0.7, linewidth=1.2,
-                                 label=f"→ level {lv}" if lv <= 2 else None)
-                    ax_s.axvline(idx, linestyle=":", color="seagreen",
-                                 alpha=0.7, linewidth=1.2)
-                prev = lv
+                if lv != prev:
+                    if prev is not None:  # skip marker at episode 0 (start)
+                        ax_r.axvline(idx, linestyle=":", color="seagreen",
+                                     alpha=0.7, linewidth=1.2,
+                                     label=f"→ level {lv}" if lv <= 2 else None)
+                        ax_s.axvline(idx, linestyle=":", color="seagreen",
+                                     alpha=0.7, linewidth=1.2)
+                    prev = lv
 
     ax_r.set_xlabel("Episode"); ax_r.set_ylabel("Episode Reward")
     ax_r.set_title("Navigation: Curriculum vs No Curriculum — Reward"); ax_r.legend()

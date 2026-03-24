@@ -24,6 +24,9 @@ single-task episodes.
 
 Warm-start: attempts to load from multitask_run1 (resume), then farming,
 then navigation — whichever exists first.
+
+VecNormalize stats are saved alongside the checkpoint so they can be
+restored at evaluation time (consistent with all other training scripts).
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ import argparse
 from pathlib import Path
 
 from stable_baselines3.common.callbacks import CallbackList
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecNormalize
 
 from python_rl.env.minecraft_env import MinecraftEnv
 from python_rl.train.train_utils import (
@@ -41,6 +44,7 @@ from python_rl.train.train_utils import (
     make_periodic_checkpoint,
     load_config,
     load_model_with_warmstart,
+    wrap_env,
 )
 
 
@@ -59,9 +63,23 @@ def main() -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-    # Single combined episode type — agent must handle all tasks at once
-    env = MinecraftEnv(task="multitask", num_crops=args.crops)
-    env = Monitor(env, filename=str(logs_dir / "multitask_monitor.csv"))
+    # Single combined episode type — agent must handle all tasks at once.
+    # wrap_env applies Monitor → DummyVecEnv → VecNormalize (obs + reward),
+    # consistent with navigation and farming training scripts.
+    base_env = MinecraftEnv(task="multitask", num_crops=args.crops)
+    env, vec_normalize = wrap_env(
+        base_env,
+        monitor_path=str(logs_dir / "multitask_monitor.csv"),
+        normalize=True,
+        norm_reward=True,
+    )
+
+    # If resuming, restore the saved normalisation statistics so the
+    # running mean/std is not reset from scratch.
+    vnorm_path = checkpoints_dir / "multitask_run1_vecnorm.pkl"
+    if args.resume and vnorm_path.exists() and vec_normalize is not None:
+        env = VecNormalize.load(str(vnorm_path), env)
+        print(f"[train_multitask] Restored VecNormalize stats from {vnorm_path}")
 
     success_log   = str(logs_dir / "multitask_success.csv")
     success_cb    = SuccessLogger(success_log)
@@ -94,12 +112,19 @@ def main() -> None:
         reset_num_timesteps=not args.resume,
     )
     model.save(str(checkpoints_dir / "multitask_run1"))
+
+    # Save VecNormalize running stats alongside the model checkpoint.
+    if vec_normalize is not None:
+        vec_normalize.save(str(vnorm_path))
+        print(f"[train_multitask] VecNormalize stats saved to {vnorm_path}")
+
     env.close()
 
     print("Multi-task training complete.")
-    print("Checkpoint : python_rl/checkpoints/multitask_run1")
-    print("Monitor CSV: python_rl/logs/multitask_monitor.csv")
-    print("Success CSV: python_rl/logs/multitask_success.csv")
+    print("Checkpoint  : python_rl/checkpoints/multitask_run1.zip")
+    print("VecNorm     : python_rl/checkpoints/multitask_run1_vecnorm.pkl")
+    print("Monitor CSV : python_rl/logs/multitask_monitor.csv")
+    print("Success CSV : python_rl/logs/multitask_success.csv")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 """
-python_rl/eval/eval_utils.py
+python_rl/utils/eval_utils.py
 -----------------------------
 Shared evaluation utilities used by evaluate_navigation.py,
 evaluate_farming.py, evaluate_combat.py, evaluate_multitask.py.
@@ -10,14 +10,19 @@ Full type annotations throughout. (Issue 8.1)
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import VecEnv
 
 from python_rl.env.minecraft_env import MinecraftEnv
 
 CHECKPOINTS_DIR = Path("python_rl/checkpoints")
+
+# Type alias: eval scripts may pass either a raw MinecraftEnv or a VecEnv
+# (e.g. DummyVecEnv + VecNormalize for evaluate_navigation).
+AnyEnv = Union[MinecraftEnv, VecEnv]
 
 
 def load_model(model_name: str) -> PPO:
@@ -42,7 +47,7 @@ def load_model(model_name: str) -> PPO:
 
 def run_episode(
     model:         PPO,
-    env:           MinecraftEnv,
+    env:           AnyEnv,
     task:          str,
     reset_options: Optional[Dict[str, Any]] = None,
     verbose:       bool                     = True,
@@ -89,7 +94,7 @@ def run_episode(
 
 def run_episodes(
     model:         PPO,
-    env:           MinecraftEnv,
+    env:           AnyEnv,
     task:          str,
     n_episodes:    int                      = 5,
     reset_options: Optional[Dict[str, Any]] = None,

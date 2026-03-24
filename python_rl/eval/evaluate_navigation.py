@@ -27,17 +27,20 @@ def main() -> None:
     args = parser.parse_args()
 
     model = load_model(args.model)
+
+    # env must be created before DummyVecEnv so the lambda closure captures it.
+    env = MinecraftEnv(task="navigation")
     vec_env = DummyVecEnv([lambda: env])
-    vnorm_path = Path("python_rl/checkpoints/nav_shaped_vecnorm.pkl")
+    vnorm_path = Path(f"python_rl/checkpoints/{args.model}_vecnorm.pkl")
     if vnorm_path.exists():
         vec_env = VecNormalize.load(str(vnorm_path), vec_env)
         vec_env.training = False   # freeze stats during eval
         vec_env.norm_reward = False
-    env = MinecraftEnv(task="navigation")
 
-    summary = run_episodes(model, env, "navigation",
+    # Pass vec_env so the model sees normalised observations (same scale as training).
+    summary = run_episodes(model, vec_env, "navigation",
                            args.episodes, verbose=not args.quiet)
-    env.close()
+    vec_env.close()
 
     print(f"\n{'='*60}")
     print(f"Model     : {args.model}")

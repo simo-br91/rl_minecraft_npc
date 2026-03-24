@@ -28,7 +28,7 @@ def _make_mock_response(data: dict) -> MagicMock:
     return r
 
 
-def _fake_obs(n: int = 28) -> list[float]:
+def _fake_obs(n: int = 104) -> list[float]:
     return [0.0] * n
 
 
@@ -89,7 +89,7 @@ class TestInit:
         assert env.action_space.n == 13
 
     def test_observation_space_dim(self, env):
-        assert env.observation_space.shape == (28,)
+        assert env.observation_space.shape == (104,)
 
     def test_obs_space_low_values(self, env):
         # dx, dz, angle_to_target, yaw_norm, pitch_norm, mob_angle can be negative
@@ -121,13 +121,13 @@ class TestReset:
         _, mock_post = mock_requests
         mock_post.return_value = _make_mock_response(_reset_response())
         obs, info = env.reset()
-        assert obs.shape == (28,)
+        assert obs.shape == (104,)
         assert isinstance(info, dict)
 
     def test_obs_clipped_to_bounds(self, env, mock_requests):
         _, mock_post = mock_requests
         # Return obs values outside [-1, 1] to test clipping
-        raw_obs = [999.0] * 28
+        raw_obs = [999.0] * 104
         mock_post.return_value = _make_mock_response(
             _reset_response(obs=raw_obs))
         obs, _ = env.reset()
@@ -276,7 +276,7 @@ class TestRetryLogic:
         from python_rl.env.minecraft_env import MinecraftEnv
         e = MinecraftEnv(retry_attempts=3)
         obs, info = e.reset()
-        assert obs.shape == (28,)
+        assert obs.shape == (104,)
         assert mock_post.call_count == 2
 
     def test_raises_after_max_attempts(self, mock_requests):

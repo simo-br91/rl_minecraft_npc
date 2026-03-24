@@ -49,8 +49,16 @@ NAV_CURRICULUM_LEVELS: list[dict] = [
      "description": "very long, 3 obstacles"},
 ]
 
-# Backward-compat alias (old scripts used CURRICULUM_LEVELS)
-CURRICULUM_LEVELS = NAV_CURRICULUM_LEVELS
+def __getattr__(name: str):
+    if name == "CURRICULUM_LEVELS":
+        import warnings
+        warnings.warn(
+            "CURRICULUM_LEVELS is deprecated; use NAV_CURRICULUM_LEVELS instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return NAV_CURRICULUM_LEVELS
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 FARMING_CURRICULUM_LEVELS: list[dict] = [
     {"level": 1, "num_crops": 1,  "full_farm_cycle": False,

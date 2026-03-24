@@ -39,7 +39,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from python_rl.env.minecraft_env import MinecraftEnv
-from python_rl.train.train_utils import _load_last_n
+from python_rl.utils.train_utils import _load_last_n
 
 LOGS_DIR        = Path("python_rl/logs")
 OPTUNA_DIR      = LOGS_DIR / "optuna"
@@ -145,6 +145,33 @@ def run_search(
     for k, v in best.items():
         print(f"  {k}: {v}")
     print(f"[hyperparameter_search] Results saved to {out_yaml}")
+
+    # Issue 6.5: patch the matching experiment YAML config so that training
+    # scripts automatically pick up the tuned hyperparameter values.
+    config_map = {
+        "navigation": "nav_shaped",
+        "farming":    "farming",
+        "combat":     "combat",
+        "multitask":  "multitask",
+    }
+    config_name = config_map.get(task)
+    if config_name:
+        config_path = Path("python_rl/configs") / f"{config_name}.yaml"
+        if config_path.exists():
+            with config_path.open("r") as cf:
+                cfg = yaml.safe_load(cf) or {}
+            ppo_keys = {"learning_rate", "ent_coef", "n_steps",
+                        "batch_size", "gamma", "clip_range"}
+            for k in ppo_keys:
+                if k in best:
+                    cfg[k] = best[k]
+            # net_width scalar → [width, width] list
+            if "net_width" in best:
+                cfg["net_arch"] = [best["net_width"], best["net_width"]]
+            with config_path.open("w") as cf:
+                yaml.dump(cfg, cf, default_flow_style=False, sort_keys=False)
+            print(f"[hyperparameter_search] Config updated: {config_path}")
+
     return best
 
 

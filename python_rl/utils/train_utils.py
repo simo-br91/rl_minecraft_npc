@@ -16,6 +16,7 @@ New in this version
 * wrap_env() defaults to VecNormalize (obs+reward normalisation). (Issues 5.1, 4.2)
 * EarlyStoppingCallback window is now configurable (was hardcoded 50). (Issue 8.4)
 * Full type annotations throughout. (Issue 8.1)
+* make_maskable_model() creates a MaskablePPO from config. (Issue 6.3)
 """
 
 from __future__ import annotations
@@ -413,6 +414,72 @@ def load_model_with_warmstart(
 
     print("[train_utils] No warm-start checkpoint found — training from scratch.")
     return PPO(
+        policy="MlpPolicy",
+        env=env,
+        verbose=1,
+        n_steps=config.get("n_steps", 2048),
+        batch_size=config.get("batch_size", 256),
+        n_epochs=config.get("n_epochs", 10),
+        learning_rate=config.get("learning_rate", 3e-4),
+        gamma=config.get("gamma", 0.99),
+        gae_lambda=config.get("gae_lambda", 0.95),
+        ent_coef=config.get("ent_coef", 0.05),
+        clip_range=config.get("clip_range", 0.2),
+        policy_kwargs=dict(net_arch=config.get("net_arch", [256, 256])),
+        tensorboard_log=str(Path(logs_dir) / "tb"),
+    )
+
+
+# ------------------------------------------------------------------
+# MaskablePPO factory (Issue 6.3)
+# ------------------------------------------------------------------
+
+def make_maskable_model(
+    env:      Any,
+    config:   Dict[str, Any],
+    logs_dir: str,
+) -> Any:
+    """
+    Create a MaskablePPO model from config.
+
+    Requires sb3-contrib (``pip install sb3-contrib``).
+    Falls back to plain PPO with a warning if sb3-contrib is not installed.
+
+    Parameters
+    ----------
+    env : gymnasium Env (should be a MaskableMinecraftEnv or subclass)
+    config : dict loaded from a YAML experiment config
+    logs_dir : str path to TensorBoard log directory
+
+    Returns
+    -------
+    MaskablePPO or PPO instance.
+    """
+    try:
+        from sb3_contrib import MaskablePPO
+    except ImportError:
+        print(
+            "[train_utils] WARNING: sb3-contrib not installed. "
+            "Falling back to plain PPO without action masking.\n"
+            "  Install with: pip install sb3-contrib"
+        )
+        return PPO(
+            policy="MlpPolicy",
+            env=env,
+            verbose=1,
+            n_steps=config.get("n_steps", 2048),
+            batch_size=config.get("batch_size", 256),
+            n_epochs=config.get("n_epochs", 10),
+            learning_rate=config.get("learning_rate", 3e-4),
+            gamma=config.get("gamma", 0.99),
+            gae_lambda=config.get("gae_lambda", 0.95),
+            ent_coef=config.get("ent_coef", 0.05),
+            clip_range=config.get("clip_range", 0.2),
+            policy_kwargs=dict(net_arch=config.get("net_arch", [256, 256])),
+            tensorboard_log=str(Path(logs_dir) / "tb"),
+        )
+
+    return MaskablePPO(
         policy="MlpPolicy",
         env=env,
         verbose=1,

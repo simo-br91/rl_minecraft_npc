@@ -22,6 +22,12 @@ Observation Space (104 dims) — see ObservationBuilder.java for full layout.
   Indices  0-28: hand-crafted features (nav, task, farming, combat, obstacles)
   Indices 29-103: local 5×3×5 voxel grid (solid=1, passable=0)
 
+Action Masking (Issue 6.3):
+  MaskableMinecraftEnv subclass exposes action_masks() compatible with
+  sb3-contrib MaskablePPO.  The Java bridge provides /masks (GET) returning
+  a 13-element validity array.  This prevents the policy from sampling
+  known-invalid actions, speeding up convergence.
+
 Fixes vs previous version
 --------------------------
 * sample_tasks now uses the gymnasium-seeded internal RNG (_np_random) so
@@ -30,6 +36,7 @@ Fixes vs previous version
 * Full type annotations added throughout. (Issue 8.1)
 * OBS_DIM updated to 104 to include the voxel grid. (Req 1.1)
 * Seed is forwarded to the Java bridge for reproducible Java RNG. (Req 3.7)
+* action_masks() added for MaskablePPO support. (Issue 6.3)
 """
 
 from __future__ import annotations
@@ -258,6 +265,24 @@ class MinecraftEnv(gym.Env):
             f"{self.retry_attempts} attempts: {last_exc}"
         )
 
+    def action_masks(self) -> np.ndarray:
+        """
+        Return a boolean mask of shape (13,) indicating valid actions.
+
+        Compatible with sb3-contrib MaskablePPO — call this from the
+        MaskableMinecraftEnv subclass or pass it to the policy directly.
+
+        Queries the Java bridge /masks endpoint (GET).  Falls back to
+        all-valid mask on any error so training is never blocked.
+        """
+        try:
+            r = requests.get(f"{self.base_url}/masks", timeout=3)
+            r.raise_for_status()
+            masks: List[int] = r.json().get("masks", [1] * 13)
+            return np.array(masks, dtype=bool)
+        except Exception:
+            return np.ones(13, dtype=bool)
+
     def _wait_for_server(
         self, max_wait: float = 60.0, interval: float = 2.0
     ) -> None:
@@ -275,3 +300,32 @@ class MinecraftEnv(gym.Env):
             f"Minecraft bridge at {self.base_url} did not respond within "
             f"{max_wait}s.  Make sure Minecraft is running with the rlnpc mod."
         )
+
+
+# ---------------------------------------------------------------------------
+# MaskableMinecraftEnv — drop-in for sb3-contrib MaskablePPO (Issue 6.3)
+# ---------------------------------------------------------------------------
+
+class MaskableMinecraftEnv(MinecraftEnv):
+    """
+    Subclass of MinecraftEnv that exposes action_masks() in the format
+    expected by sb3-contrib MaskablePPO.
+
+    Usage
+    -----
+        from sb3_contrib import MaskablePPO
+        from python_rl.env.minecraft_env import MaskableMinecraftEnv
+
+        env = MaskableMinecraftEnv(task="navigation")
+        model = MaskablePPO("MlpPolicy", env, ...)
+        model.learn(...)
+
+    The mask is fetched from the Java bridge on every step via /masks.
+    It mirrors ActionExecutor preconditions so the policy never wastes
+    samples on actions like interact (when no crop is in front) or attack
+    (when no mobs are nearby).
+    """
+
+    def action_masks(self) -> np.ndarray:
+        """Return boolean validity mask, shape (13,)."""
+        return super().action_masks()

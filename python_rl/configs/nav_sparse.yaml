@@ -6,6 +6,14 @@ min_dist: 7.0
 max_dist: 14.0
 num_obstacles: 2
 total_timesteps: 200000
+
+# ---- Hyperparameters (Issue 6.5) ----
+# ent_coef raised to 0.10 vs nav_shaped (0.05): sparse rewards give fewer
+# training signal so higher entropy bonus maintains exploration longer.
+# Rationale: PPO with sparse rewards needs more entropy regularisation to
+# avoid premature convergence to a local optimum before any success is seen.
+# To tune automatically:
+#   python -m python_rl.train.hyperparameter_search --task navigation --trials 30
 n_steps: 2048
 batch_size: 256
 n_epochs: 10
@@ -15,6 +23,7 @@ gae_lambda: 0.95
 ent_coef: 0.10
 clip_range: 0.2
 net_arch: [256, 256]
+
 checkpoint_name: nav_sparse_run1
 monitor_log: nav_sparse_monitor.csv
 success_log: nav_sparse_success.csv

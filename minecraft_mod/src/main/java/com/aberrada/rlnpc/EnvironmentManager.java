@@ -548,6 +548,87 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
+    // Action mask (Issue 6.3 — MaskablePPO support)
+    // ------------------------------------------------------------------
+
+    /**
+     * Returns a 13-element boolean array indicating which actions are valid
+     * in the current episode state.  The Python side uses this array with
+     * sb3-contrib MaskablePPO to prevent the policy from sampling actions
+     * that are known to be invalid, speeding up convergence.
+     *
+     * Mask logic mirrors ActionExecutor preconditions exactly:
+     *   0  forward          always valid
+     *   1  turn_left        always valid
+     *   2  turn_right       always valid
+     *   3  interact         valid if farming/multitask AND mature crop in front
+     *   4  no_op            always valid
+     *   5  jump             valid if 1-block wall ahead AND clear above
+     *   6  sprint_forward   always valid
+     *   7  move_backward    always valid
+     *   8  strafe_left      always valid
+     *   9  strafe_right     always valid
+     *  10  attack           valid if hostile mob within attack range
+     *  11  eat              valid if food < 20 AND food slot not empty
+     *  12  switch_item      always valid
+     */
+    public synchronized String actionMasks() {
+        CompletableFuture<String> future = new CompletableFuture<>();
+        server.execute(() -> {
+            try {
+                ServerLevel level = getOverworld();
+                if (level == null) {
+                    future.complete("{\"masks\":[1,1,1,1,1,1,1,1,1,1,1,1,1]}");
+                    return;
+                }
+                RLNpcEntity agent = getOrCreateAgent(level);
+                boolean[] mask = computeActionMask(agent);
+                StringBuilder sb = new StringBuilder("{\"masks\":[");
+                for (int i = 0; i < mask.length; i++) {
+                    if (i > 0) sb.append(",");
+                    sb.append(mask[i] ? 1 : 0);
+                }
+                sb.append("]}");
+                future.complete(sb.toString());
+            } catch (Exception e) {
+                // Fall back to all-valid mask on error
+                future.complete("{\"masks\":[1,1,1,1,1,1,1,1,1,1,1,1,1]}");
+            }
+        });
+        try { return future.get(3, TimeUnit.SECONDS); }
+        catch (Exception e) { return "{\"masks\":[1,1,1,1,1,1,1,1,1,1,1,1,1]}"; }
+    }
+
+    private boolean[] computeActionMask(RLNpcEntity agent) {
+        boolean[] mask = new boolean[13];
+        java.util.Arrays.fill(mask, true);   // default: all valid
+
+        // Action 3 — interact: only valid when facing a mature crop
+        boolean farmingTask = "farming".equals(state.taskName)
+                           || "multitask".equals(state.taskName);
+        mask[3] = farmingTask && ObservationBuilder.isMatureCropInFront(agent);
+
+        // Action 5 — jump: only valid when a 1-block wall is ahead AND passable above
+        mask[5] = ObservationBuilder.is1BlockObstacleAhead(agent);
+
+        // Action 10 — attack: only valid when a mob is within attack range
+        net.minecraft.world.phys.AABB box = agent.getBoundingBox()
+                .inflate(ActionExecutor.ATTACK_RANGE);
+        java.util.List<net.minecraft.world.entity.monster.Monster> mobs =
+                agent.level().getEntitiesOfClass(
+                        net.minecraft.world.entity.monster.Monster.class, box,
+                        m -> m.isAlive() && !m.isSpectator());
+        mask[10] = !mobs.isEmpty();
+
+        // Action 11 — eat: only valid when hungry AND food is available
+        mask[11] = state.foodLevel < 20
+                && !agent.getInventory()
+                         .getItem(InventoryManager.SLOT_FOOD).isEmpty();
+
+        return mask;
+    }
+
+    // ------------------------------------------------------------------
     // Distance helper
     // ------------------------------------------------------------------
 
