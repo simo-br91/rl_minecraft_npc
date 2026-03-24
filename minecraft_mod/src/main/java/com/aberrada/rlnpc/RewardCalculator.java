@@ -14,6 +14,13 @@ package com.aberrada.rlnpc;
  *    the time penalty (−0.015/step) is sufficient deterrent against doing
  *    nothing, and penalising no_op as "invalid" would conflate two different
  *    semantics. Documented here for clarity.
+ *  - Bug 3.3 (inverted nav drift condition): NAV_DRIFT_PENALTY was guarded
+ *    by `before < NAV_DRIFT_THRESHOLD` which fired when the agent was CLOSE
+ *    to the target, not far. Corrected to `before > NAV_DRIFT_THRESHOLD`.
+ *  - Bug 3.4 (combat stuck penalty): the stuck counter increments when the
+ *    nav-target distance doesn't change, which is normal in combat (fighting
+ *    in place). The stuck penalty is now suppressed in combat mode to avoid
+ *    penalising the agent for a valid in-place fighting strategy.
  */
 public class RewardCalculator {
 
@@ -112,8 +119,10 @@ public class RewardCalculator {
         r += PROGRESS_COEFF * (before - after);
         r += TIME_PENALTY;
 
-        // Drift penalty when far from target (> 3 blocks) and moving away
-        if (before < NAV_DRIFT_THRESHOLD && after > before + NAV_DRIFT_STEP) {
+        // Drift penalty when far from target (> 3 blocks) and moving away.
+        // FIX 3.3: was `before < NAV_DRIFT_THRESHOLD` (wrong — penalised near
+        // target only). Corrected to `before > NAV_DRIFT_THRESHOLD`.
+        if (before > NAV_DRIFT_THRESHOLD && after > before + NAV_DRIFT_STEP) {
             r += NAV_DRIFT_PENALTY;
         }
 
@@ -173,7 +182,11 @@ public class RewardCalculator {
         if (state.isDead)          r += DEATH_PENALTY;
         if (success)               r += ALL_KILLED_BONUS;
         if (!valid)                r += INVALID_PENALTY;
-        if (state.stuckSteps >= STUCK_LIMIT) r += STUCK_PENALTY;
+        // FIX 3.4: Stuck penalty removed for combat.
+        // The stuck counter is based on nav-target distance, which barely
+        // changes when the agent is fighting in place — a completely valid
+        // and optimal combat strategy (mobs come to the agent).  Applying
+        // the stuck penalty here incorrectly penalises standing and fighting.
         return r;
     }
 

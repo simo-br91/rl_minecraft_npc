@@ -90,8 +90,8 @@ def main() -> None:
     early_stop_cb = EarlyStoppingCallback(
         success_log_path=success_log,
         target_success_rate=0.80,
-        window=50,
-        patience=3,
+        window=30,
+        patience=1,
     )
 
     # Warm-start priority: resumed run > best farming > best navigation

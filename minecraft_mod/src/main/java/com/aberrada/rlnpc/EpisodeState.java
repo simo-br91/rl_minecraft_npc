@@ -121,6 +121,12 @@ public class EpisodeState {
     public int        mobsKilled      = 0;
     /** How many times the agent was hit. */
     public int        timesHit        = 0;
+    /**
+     * Episode step at which the last successful (full-damage) attack landed.
+     * Initialised to a large negative value so the cooldown is always
+     * expired at the start of a new episode. (FIX 3.2)
+     */
+    public int        lastAttackStep  = -100;
 
     // ------------------------------------------------------------------
     // Pitch (vertical look) for human-like movement
@@ -152,7 +158,10 @@ public class EpisodeState {
             case "combat" -> {
                 this.taskName = "combat";
                 this.taskId   = 2.0;
-                this.maxSteps = 200;
+                // FIX 3.2: Increased from 200 → 400 so the agent has enough
+                // time to navigate to mobs (6–10 blocks away) and kill all 3
+                // with the 12-step attack cooldown.  200 steps was too tight.
+                this.maxSteps = 400;
             }
             case "multitask" -> {
                 this.taskName = "multitask";
@@ -185,6 +194,7 @@ public class EpisodeState {
         this.mobsKilled         = 0;
         this.timesHit           = 0;
         this.isDead             = false;
+        this.lastAttackStep     = -100;
         this.isSprinting        = false;
         this.targetPitch        = 0.0f;
         this.currentPitch       = 0.0f;

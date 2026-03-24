@@ -75,12 +75,12 @@ def main() -> None:
         str(checkpoints_dir / "nav_sparse_checkpoints"),
         prefix="nav_sparse",
     )
-    # Sparse training needs more episodes to converge — higher patience.
+    # Sparse training needs a slightly larger window for a stable signal.
     early_stop_cb = EarlyStoppingCallback(
         success_log_path=success_log,
         target_success_rate=0.85,
-        window=50,
-        patience=5,
+        window=30,
+        patience=2,
     )
 
     warmstart = [checkpoints_dir / cfg.get("checkpoint_name", "nav_sparse_run1")] \

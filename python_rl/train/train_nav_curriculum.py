@@ -133,8 +133,8 @@ def main() -> None:
     early_stop_cb = EarlyStoppingCallback(
         success_log_path=success_log,
         target_success_rate=0.95,
-        window=50,
-        patience=3,
+        window=30,
+        patience=1,
     )
 
     model = load_model_with_warmstart([], env, cfg, str(logs_dir))
