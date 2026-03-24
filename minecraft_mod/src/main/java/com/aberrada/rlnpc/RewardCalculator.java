@@ -26,6 +26,9 @@ public class RewardCalculator {
     private static final double INVALID_PENALTY  = -0.10;
     private static final double STUCK_PENALTY    = -0.25;
     private static final int    STUCK_LIMIT      = 8;
+    private static final double NAV_DRIFT_THRESHOLD  = 3.0;   // blocks
+    private static final double NAV_DRIFT_STEP        = 0.05;  // min movement to count as drift
+    private static final double NAV_DRIFT_PENALTY     = -0.10;
 
     // Shaped: farming
     private static final double NEAR_CROP_BONUS  = 0.05;
@@ -88,6 +91,10 @@ public class RewardCalculator {
         double r = 0.0;
         r += PROGRESS_COEFF * (before - after);
         r += TIME_PENALTY;
+        // Drift penalty: penalise moving away when already close to target
+        if (before < NAV_DRIFT_THRESHOLD && after > before + NAV_DRIFT_STEP) {
+            r += NAV_DRIFT_PENALTY;
+        }
         if (state.lastJumpedObstacle) r += JUMP_BONUS;
         if (success)                  r += NAV_SUCCESS;
         if (!valid)                   r += INVALID_PENALTY;

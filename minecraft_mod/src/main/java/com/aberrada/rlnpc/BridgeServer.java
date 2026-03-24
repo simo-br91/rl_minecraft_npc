@@ -49,8 +49,9 @@ public class BridgeServer {
                 int     numCrops        = getInt(body,    "num_crops",          5);
                 boolean fullFarmCycle   = getBool(body,   "full_farm_cycle",   false);
 
+                int seed = getInt(body,"seed", -1);
                 String result = env.reset(task, sparseReward, minDist, maxDist,
-                                          numObstacles, numCrops, fullFarmCycle);
+                                          numObstacles, numCrops, fullFarmCycle, seed);
                 sendJson(ex, 200, result);
             });
 

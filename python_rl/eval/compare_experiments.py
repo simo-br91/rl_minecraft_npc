@@ -58,14 +58,9 @@ def load_success(filename: str) -> Optional[pd.DataFrame]:
     return pd.read_csv(p)
 
 
-def smooth(values: list[float], window: int) -> np.ndarray:
-    if len(values) < window:
-        return np.array(values)
-    return np.convolve(values, np.ones(window) / window, mode="valid")
-
-
-def rolling_sr(successes: list[int], window: int) -> np.ndarray:
-    arr = np.array(successes, dtype=float)
+def moving_average(values, window: int) -> np.ndarray:
+    """Uniform moving average. Replaces the former smooth() and rolling_sr()."""
+    arr = np.array(values, dtype=float)
     if len(arr) < window:
         return arr
     return np.convolve(arr, np.ones(window) / window, mode="valid")
@@ -83,29 +78,22 @@ def final_success_rate(success_file: str, last_n: int = 100) -> float:
 # Plot helpers
 # ------------------------------------------------------------------
 
-def plot_comparison(
-    ax_reward: plt.Axes,
-    ax_success: plt.Axes,
-    runs: list[dict],
-    window: int = 20,
-) -> None:
+def plot_comparison(ax_reward, ax_success, runs, window=20):
     for run in runs:
         label = run["label"]
         color = run.get("color", None)
-
         df_mon = load_monitor(run["monitor_csv"])
         if df_mon is not None:
-            rewards  = df_mon["r"].tolist()
-            sm       = smooth(rewards, window)
+            rewards = df_mon["r"].tolist()
+            sm      = moving_average(rewards, window)
             ax_reward.plot(range(len(rewards)), rewards, alpha=0.18,
                            linewidth=0.7, color=color)
             ax_reward.plot(range(window - 1, len(rewards)), sm,
                            linewidth=2, label=label, color=color)
-
         df_suc = load_success(run["success_csv"])
         if df_suc is not None:
             successes = df_suc["success"].tolist()
-            sr        = rolling_sr(successes, window)
+            sr        = moving_average(successes, window)
             ax_success.plot(range(len(successes)), successes, alpha=0.12,
                             linewidth=0.6, color=color)
             ax_success.plot(range(window - 1, len(successes)), sr,
@@ -274,12 +262,21 @@ def plot_final_success_bar(last_n: int = 100) -> None:
 # ------------------------------------------------------------------
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate comparison plots.")
+    parser.add_argument("--last-n", type=int, default=100,
+                        help="Episodes to average for the final success-rate bar chart "
+                             "(default: 100).  Increase for longer training runs.")
+    parser.add_argument("--window", type=int, default=20,
+                        help="Smoothing window in episodes for all curves (default: 20).")
+    args = parser.parse_args()
+
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     print("=== Generating comparison plots ===")
-    plot_shaped_vs_sparse()
-    plot_curriculum_vs_nocurriculum()
-    plot_multitask_overview()
-    plot_final_success_bar()
+    plot_shaped_vs_sparse(window=args.window)
+    plot_curriculum_vs_nocurriculum(window=args.window)
+    plot_multitask_overview(window=args.window)
+    plot_final_success_bar(last_n=args.last_n)
     print("=== Done ===")
     print(f"All plots saved to: {PLOTS_DIR}/")
 

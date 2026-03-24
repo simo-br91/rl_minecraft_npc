@@ -85,7 +85,8 @@ public class EnvironmentManager {
                                      double  maxDist,
                                      int     numObstacles,
                                      int     numCrops,
-                                     boolean fullFarmingCycle) {
+                                     boolean fullFarmingCycle,
+                                     int     seed) {
         ServerPlayer observer = getObserverPlayer();
         if (observer == null) return errorJson("No player found. Open a singleplayer world first.");
 
@@ -93,6 +94,7 @@ public class EnvironmentManager {
         server.execute(() -> {
             try {
                 ServerLevel level = observer.serverLevel();
+                if (seed >= 0) rng.setSeed(seed);
                 applyWorldSettings();
 
                 // Clean previous episode

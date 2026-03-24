@@ -10,6 +10,8 @@ Usage
 """
 
 from __future__ import annotations
+from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
+from pathlib import Path
 
 import argparse
 
@@ -25,7 +27,13 @@ def main() -> None:
     args = parser.parse_args()
 
     model = load_model(args.model)
-    env   = MinecraftEnv(task="navigation")
+    vec_env = DummyVecEnv([lambda: env])
+    vnorm_path = Path("python_rl/checkpoints/nav_shaped_vecnorm.pkl")
+    if vnorm_path.exists():
+        vec_env = VecNormalize.load(str(vnorm_path), vec_env)
+        vec_env.training = False   # freeze stats during eval
+        vec_env.norm_reward = False
+    env = MinecraftEnv(task="navigation")
 
     summary = run_episodes(model, env, "navigation",
                            args.episodes, verbose=not args.quiet)

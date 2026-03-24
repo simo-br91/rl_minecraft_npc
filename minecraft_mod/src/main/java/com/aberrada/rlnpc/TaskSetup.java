@@ -132,8 +132,10 @@ public class TaskSetup {
         state.cropsHarvested  = 0;
 
         // Spread crops in a grid-ish pattern around a central point
-        int centerX = 6 + rng.nextInt(5) - 2;
-        int centerZ = 2 + rng.nextInt(5) - 2;
+        double farmAngle = rng.nextDouble() * 2.0 * Math.PI;
+        double farmDist  = 5.0 + rng.nextDouble() * 10.0;
+        int    centerX   = (int) Math.round(Math.cos(farmAngle) * farmDist);
+        int    centerZ   = (int) Math.round(Math.sin(farmAngle) * farmDist);
 
         List<int[]> positions = generateCropPositions(centerX, centerZ, numCrops, rng);
         int groundY = getReferenceGroundY(level, centerX, centerZ);

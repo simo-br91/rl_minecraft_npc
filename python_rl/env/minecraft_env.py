@@ -57,7 +57,7 @@ ACTION_ATTACK      = 10
 ACTION_EAT         = 11
 ACTION_SWITCH_ITEM = 12
 
-OBS_DIM = 28
+OBS_DIM = 29
 
 
 class MinecraftEnv(gym.Env):
@@ -116,12 +116,12 @@ class MinecraftEnv(gym.Env):
         # 18  active_slot_norm 19 holding_sword   20  holding_food
         # 21  crops_remaining 22  block_N         23  block_E
         # 24  block_S         25  block_W         26  farmland_ahead
-        # 27  has_seed
+        # 27  has_seed        28  height_above_gnd
         low  = np.array(
-            [-1,-1, 0,-1,-1,-1, 0,0,0,0, 0,0,0, 0,0, 0,0,-1, 0,0,0, 0, 0,0,0,0, 0,0],
+            [-1,-1, 0,-1,-1,-1, 0,0,0,0, 0,0,0, 0,0, 0,0,-1, 0,0,0, 0, 0,0,0,0, 0,0, 0],
             dtype=np.float32)
         high = np.array(
-            [ 1, 1, 1, 1, 1, 1, 1,1,1,1, 1,1,1, 1,1, 1,1, 1, 1,1,1, 1, 1,1,1,1, 1,1],
+            [ 1, 1, 1, 1, 1, 1, 1,1,1,1, 1,1,1, 1,1, 1,1, 1, 1,1,1, 1, 1,1,1,1, 1,1, 1],
             dtype=np.float32)
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 

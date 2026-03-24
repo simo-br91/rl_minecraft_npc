@@ -46,6 +46,7 @@ import java.util.Locale;
  *  25    block_W           (1 if solid block 1.5 ahead at W)
  *  26    farmland_ahead    (1 if untilled soil directly ahead)
  *  27    has_seed          (1 if agent has seeds — always true in simulation)
+ *  28    height_above_gnd  (agent Y − surface Y, normalised by 5 blocks, clamped [0,1])
  *
  * Changes vs previous version
  * ----------------------------
@@ -56,7 +57,7 @@ import java.util.Locale;
  */
 public class ObservationBuilder {
 
-    public static final int OBS_DIM  = 28;
+    public static final int OBS_DIM  = 29;
     private static final double MAX_DIST    = 30.0;
     private static final double MOB_RANGE   = 8.0;
     // FIX: raised from 10.0 → 15.0 to avoid premature saturation
@@ -108,6 +109,9 @@ public class ObservationBuilder {
         double farmlandAhead   = isFarmlandAhead(agent) ? 1.0 : 0.0;
         double hasSeed         = 1.0;  // agent always has seeds in simulation
 
+        double groundY           = ActionExecutor.findSurfaceY(agent, agent.getX(), agent.getY(), agent.getZ());
+        double heightAboveGround = Math.max(0.0, Math.min(1.0, (agent.getY() - groundY) / 5.0));
+
         return new double[] {
             dxNorm,             //  0
             dzNorm,             //  1
@@ -137,6 +141,7 @@ public class ObservationBuilder {
             cardinal[3],        // 25  W
             farmlandAhead,      // 26
             hasSeed,            // 27
+            heightAboveGround,  // 28
         };
     }
 

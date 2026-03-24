@@ -19,7 +19,8 @@ from stable_baselines3.common.callbacks import CallbackList
 
 from python_rl.env.minecraft_env import MinecraftEnv
 from python_rl.train.train_utils import (
-    SuccessLogger, make_periodic_checkpoint, load_config, wrap_env, load_model_with_warmstart
+    SuccessLogger, EarlyStoppingCallback, make_periodic_checkpoint,
+    load_config, wrap_env, load_model_with_warmstart
 )
 
 
@@ -39,16 +40,23 @@ def main() -> None:
     env = MinecraftEnv(task="combat")
     vec_env, _ = wrap_env(env, str(logs_dir / "combat_monitor.csv"), normalize=False)
 
-    success_cb    = SuccessLogger(str(logs_dir / "combat_success.csv"))
+    success_log   = str(logs_dir / "combat_success.csv")
+    success_cb    = SuccessLogger(success_log)
     checkpoint_cb = make_periodic_checkpoint(
         str(checkpoints_dir / "combat_checkpoints"), prefix="combat")
+    early_stop_cb = EarlyStoppingCallback(
+        success_log_path=success_log,
+        target_success_rate=0.90,
+        window=50,
+        patience=3,
+    )
 
     warmstart = [checkpoints_dir / "combat_run1"] if args.resume else []
     model = load_model_with_warmstart(warmstart, vec_env, cfg, str(logs_dir))
 
     model.learn(
         total_timesteps=cfg.get("total_timesteps", 300_000),
-        callback=CallbackList([success_cb, checkpoint_cb]),
+        callback=CallbackList([success_cb, checkpoint_cb, early_stop_cb]),
         reset_num_timesteps=not args.resume,
     )
     model.save(str(checkpoints_dir / "combat_run1"))
