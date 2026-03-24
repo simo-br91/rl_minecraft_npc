@@ -5,7 +5,10 @@
       "Bash(find:*)",
       "Bash(Remove-Item \"C:\\Users\\simor\\.claude-worktrees\\rl_minecraft_npc\\laughing-gauss\\python_rl\\train\\test_day1_env.py\")",
       "Bash(Remove-Item \"C:\\Users\\simor\\.claude-worktrees\\rl_minecraft_npc\\laughing-gauss\\python_rl\\train\\test_day2_env.py\")",
-      "Bash(Remove-Item \"C:\\Users\\simor\\.claude-worktrees\\rl_minecraft_npc\\laughing-gauss\\python_rl\\train\\random_rollout.py\")"
+      "Bash(Remove-Item \"C:\\Users\\simor\\.claude-worktrees\\rl_minecraft_npc\\laughing-gauss\\python_rl\\train\\random_rollout.py\")",
+      "Bash(python -m pytest:*)",
+      "Bash(cmd /c \"cd /d C:\\Users\\simor\\Documents\\rl_minecraft_npc && python -m pytest python_rl/tests/ -v 2>&1\")",
+      "Bash(dir:*)"
     ],
     "deny": [],
     "ask": []
