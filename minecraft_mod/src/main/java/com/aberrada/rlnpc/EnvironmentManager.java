@@ -9,8 +9,6 @@ import net.minecraft.world.Difficulty;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobSpawnType;
-import net.minecraft.world.entity.monster.Skeleton;
-import net.minecraft.world.entity.monster.Zombie;
 import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
@@ -399,8 +397,10 @@ public class EnvironmentManager {
             double mz = cz + Math.sin(angle) * dist;
             double my = TaskSetup.resolveStandY(level, mx, mz);
 
-            net.minecraft.world.entity.monster.Monster mob =
-                    (i % 2 == 0) ? new Zombie(level) : new Skeleton(level);
+            net.minecraft.world.entity.monster.Monster mob = (i % 2 == 0)
+                    ? net.minecraft.world.entity.EntityType.ZOMBIE.create(level)
+                    : net.minecraft.world.entity.EntityType.SKELETON.create(level);
+            if (mob == null) continue;   // EntityType.create() returns null on failure
             mob.moveTo(mx, my, mz, (float)(rng.nextDouble() * 360), 0);
             mob.finalizeSpawn(level,
                     level.getCurrentDifficultyAt(BlockPos.containing(mx, my, mz)),

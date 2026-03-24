@@ -1,5 +1,6 @@
 package com.aberrada.rlnpc;
 
+import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.PathfinderMob;
@@ -17,6 +18,12 @@ import net.minecraft.world.level.Level;
  * - Respawns next episode (via getOrCreateAgent in EnvironmentManager)
  */
 public class RLNpcEntity extends PathfinderMob {
+
+    /** 5-slot inventory: sword, food, seeds, hoe, bonemeal. */
+    private final SimpleContainer inventory = new SimpleContainer(5);
+
+    /** Returns the NPC's item inventory (5 slots). */
+    public SimpleContainer getInventory() { return inventory; }
 
     public RLNpcEntity(EntityType<? extends PathfinderMob> type, Level level) {
         super(type, level);
