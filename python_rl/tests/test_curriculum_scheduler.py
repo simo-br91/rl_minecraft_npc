@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
+import python_rl.train.curriculum_scheduler as _sched_mod
 from python_rl.train.curriculum_scheduler import (
     CurriculumScheduler,
     NavCurriculumScheduler,
     FarmingCurriculumScheduler,
     NAV_CURRICULUM_LEVELS,
     FARMING_CURRICULUM_LEVELS,
-    CURRICULUM_LEVELS,
 )
 
 
@@ -73,7 +73,12 @@ class TestLevelDefinitions:
             assert required.issubset(lvl.keys())
 
     def test_backward_compat_alias(self):
-        assert CURRICULUM_LEVELS is NAV_CURRICULUM_LEVELS
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            alias = _sched_mod.CURRICULUM_LEVELS
+        assert alias is NAV_CURRICULUM_LEVELS
+        assert any("CURRICULUM_LEVELS is deprecated" in str(x.message) for x in w)
 
 
 # ------------------------------------------------------------------ #
@@ -289,7 +294,9 @@ class TestGetResetOptions:
 
 class TestDequeWindow:
     def test_window_size_respected(self):
-        s = make_scheduler(advance_threshold=0.70, advance_window=3)
+        # Use advance_threshold=1.01 (unreachable) so advancement never fires
+        # and we can inspect the raw window contents in isolation.
+        s = make_scheduler(advance_threshold=1.01, regress_threshold=None, advance_window=3)
         # Feed 10 failures then 3 successes — window should only see last 3
         feed(s, [False] * 10)
         assert s.success_rate() == 0.0

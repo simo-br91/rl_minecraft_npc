@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: rl_minecraft_npc
+Version: 1.0.0
+Summary: Reinforcement learning for a multi-skill NPC inside Minecraft 1.20.1 via a custom Forge mod.
+Author: Simo
+Requires-Python: >=3.10
+Requires-Dist: stable-baselines3>=2.3.0
+Requires-Dist: sb3-contrib>=2.3.0
+Requires-Dist: gymnasium>=0.29.0
+Requires-Dist: torch>=2.1.0
+Requires-Dist: tensorboard>=2.14.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: matplotlib>=3.7.0
+Requires-Dist: pyyaml>=6.0.1
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4.0; extra == "dev"
+Dynamic: author
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

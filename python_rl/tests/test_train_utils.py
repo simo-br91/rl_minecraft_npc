@@ -28,8 +28,8 @@ from python_rl.train.train_utils import (
     EarlyStoppingCallback,
     make_periodic_checkpoint,
     load_config,
-    _load_last_n,
 )
+from python_rl.utils.train_utils import _load_last_n
 
 
 # ------------------------------------------------------------------ #
