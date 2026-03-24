@@ -12,7 +12,15 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Minimal HTTP bridge exposing /health, /reset, /step.
+ * Minimal HTTP bridge exposing /health, /reset, /step, /masks.
+ *
+ * Endpoints:
+ *   GET  /health — liveness probe
+ *   POST /reset  — start a new episode
+ *   POST /step   — advance one game tick
+ *   GET  /masks  — returns the current 13-element action-validity mask as a
+ *                  JSON array of integers (1=valid, 0=invalid). Used by
+ *                  sb3-contrib MaskablePPO on the Python side. (Issue 6.3)
  *
  * JSON parsing is done once per request (was previously done 5 times).
  */
@@ -62,6 +70,15 @@ public class BridgeServer {
                 JsonObject body = parseBody(ex);
                 int action = getInt(body, "action", 4);
                 sendJson(ex, 200, env.step(action));
+            });
+
+            // /masks — returns the current 13-element action validity mask.
+            // Only GET is accepted (idempotent read; no body needed).
+            server.createContext("/masks", ex -> {
+                if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                    sendJson(ex, 405, "{\"error\":\"Use GET\"}"); return;
+                }
+                sendJson(ex, 200, env.actionMasks());
             });
 
             server.setExecutor(null);

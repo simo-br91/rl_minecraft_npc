@@ -21,12 +21,12 @@ Bug fixed vs previous version
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import gymnasium as gym
-from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecNormalize
 
 from python_rl.env.minecraft_env import MinecraftEnv
 from python_rl.train.curriculum_scheduler import NavCurriculumScheduler
@@ -36,6 +36,7 @@ from python_rl.train.train_utils import (
     make_periodic_checkpoint,
     load_config,
     load_model_with_warmstart,
+    wrap_env,
 )
 
 
@@ -78,48 +79,21 @@ class CurriculumEnv(gym.Wrapper):
 
 
 # ------------------------------------------------------------------
-# Logging callback for level tracking
-# ------------------------------------------------------------------
-
-class CurriculumLevelLogger:
-    """
-    Thin wrapper: logs (timestep, level, success) to a CSV after each
-    episode.  Implemented as a SB3 BaseCallback.
-    """
-
-    from stable_baselines3.common.callbacks import BaseCallback as _BC
-
-    class _Impl(_BC):
-        def __init__(self, curriculum_env: "CurriculumEnv",
-                     log_path: str, verbose: int = 0) -> None:
-            super().__init__(verbose)
-            self._curriculum_env = curriculum_env
-            self._log_path = Path(log_path)
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._log_path.open("w") as f:
-                f.write("timestep,level,success\n")
-
-        def _on_step(self) -> bool:
-            for done, info in zip(self.locals["dones"], self.locals["infos"]):
-                if done:
-                    success = int(info.get("success", False))
-                    level   = self._curriculum_env.scheduler.level_number
-                    with self._log_path.open("a") as f:
-                        f.write(f"{self.num_timesteps},{level},{success}\n")
-            return True
-
-
-# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="nav_curriculum")
+    parser.add_argument("--resume", action="store_true")
+    args = parser.parse_args()
+
     logs_dir        = Path("python_rl/logs")
     checkpoints_dir = Path("python_rl/checkpoints")
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = load_config("nav_curriculum")
+    cfg = load_config(args.config)
 
     scheduler = NavCurriculumScheduler(
         advance_threshold=cfg.get("advance_threshold", 0.70),
@@ -131,12 +105,27 @@ def main() -> None:
 
     base_env = MinecraftEnv(task="navigation")
     curr_env = CurriculumEnv(base_env, scheduler)
-    env      = Monitor(curr_env, filename=str(logs_dir / "nav_curriculum_monitor.csv"))
+
+    # wrap_env applies Monitor → DummyVecEnv → VecNormalize (obs + reward),
+    # consistent with all other training scripts.
+    env, vec_normalize = wrap_env(
+        curr_env,
+        monitor_path=str(logs_dir / "nav_curriculum_monitor.csv"),
+        normalize=True,
+        norm_reward=True,
+    )
+
+    # If resuming, restore saved normalisation stats so running mean/std
+    # is not reset from scratch.
+    vnorm_path = checkpoints_dir / "nav_curriculum_run1_vecnorm.pkl"
+    if args.resume and vnorm_path.exists() and vec_normalize is not None:
+        env = VecNormalize.load(str(vnorm_path), env)
+        print(f"[train_nav_curriculum] Restored VecNormalize stats from {vnorm_path}")
 
     success_log  = str(logs_dir / "nav_curriculum_success.csv")
     success_cb   = SuccessLogger(success_log)
-    level_cb     = CurriculumLevelLogger._Impl(
-        curr_env, str(logs_dir / "nav_curriculum_success.csv"))
+    # Level logging is handled by NavCurriculumScheduler directly
+    # (writes episode,timestep,level,success,rolling_success_rate to nav_curriculum_levels.csv).
     checkpoint_cb = make_periodic_checkpoint(
         str(checkpoints_dir / "nav_curriculum_checkpoints"),
         prefix="nav_curriculum",
@@ -152,14 +141,22 @@ def main() -> None:
 
     model.learn(
         total_timesteps=cfg.get("total_timesteps", 250_000),
-        callback=CallbackList([success_cb, level_cb, checkpoint_cb, early_stop_cb]),
+        callback=CallbackList([success_cb, checkpoint_cb, early_stop_cb]),
+        reset_num_timesteps=not args.resume,
     )
     model.save(str(checkpoints_dir / "nav_curriculum_run1"))
+
+    # Save VecNormalize running stats alongside the model checkpoint.
+    if vec_normalize is not None:
+        vec_normalize.save(str(vnorm_path))
+        print(f"[train_nav_curriculum] VecNormalize stats saved to {vnorm_path}")
+
     env.close()
 
     print("Curriculum training complete.")
     print(f"Final scheduler state: {scheduler}")
     print("Checkpoint   :", checkpoints_dir / "nav_curriculum_run1")
+    print("VecNorm      :", vnorm_path)
     print("Monitor CSV  :", logs_dir / "nav_curriculum_monitor.csv")
     print("Success CSV  :", logs_dir / "nav_curriculum_success.csv")
     print("Level log CSV:", logs_dir / "nav_curriculum_levels.csv")

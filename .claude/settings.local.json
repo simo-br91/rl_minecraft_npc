@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(Remove-Item \"C:\\Users\\simor\\.claude-worktrees\\rl_minecraft_npc\\laughing-gauss\\python_rl\\train\\test_day1_env.py\")",
+      "Bash(Remove-Item \"C:\\Users\\simor\\.claude-worktrees\\rl_minecraft_npc\\laughing-gauss\\python_rl\\train\\test_day2_env.py\")",
+      "Bash(Remove-Item \"C:\\Users\\simor\\.claude-worktrees\\rl_minecraft_npc\\laughing-gauss\\python_rl\\train\\random_rollout.py\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

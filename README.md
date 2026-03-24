@@ -37,9 +37,13 @@ Create or open a **flat world** and wait for:
 python -m python_rl.train.train_navigation          # shaped-reward baseline
 python -m python_rl.train.train_nav_sparse          # sparse comparison
 python -m python_rl.train.train_nav_curriculum      # 4-level curriculum
+python -m python_rl.train.train_nav_maskable        # MaskablePPO with action masking
 python -m python_rl.train.train_farming             # single-task farming
 python -m python_rl.train.train_combat              # combat task
 python -m python_rl.train.train_multitask           # shared policy (all tasks in one episode)
+
+# Optional: hyperparameter search with Optuna (writes best params back to config)
+python -m python_rl.train.hyperparameter_search --task navigation --trials 30
 ```
 
 ### Evaluate

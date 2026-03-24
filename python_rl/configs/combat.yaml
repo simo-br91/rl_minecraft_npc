@@ -3,6 +3,13 @@ task: combat
 reward_type: shaped
 curriculum: false
 total_timesteps: 300000
+
+# ---- Hyperparameters (Issue 6.5) ----
+# ent_coef=0.08 (between nav_shaped 0.05 and nav_sparse 0.10): combat has
+# stochastic outcomes (mob AI, attack timing) so slightly higher entropy
+# helps the policy explore positioning and attack sequences.
+# To tune automatically:
+#   python -m python_rl.train.hyperparameter_search --task combat --trials 20
 n_steps: 2048
 batch_size: 256
 n_epochs: 10
@@ -12,6 +19,7 @@ gae_lambda: 0.95
 ent_coef: 0.08
 clip_range: 0.2
 net_arch: [256, 256]
+
 checkpoint_name: combat_run1
 monitor_log: combat_monitor.csv
 success_log: combat_success.csv

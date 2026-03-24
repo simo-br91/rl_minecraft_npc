@@ -39,17 +39,23 @@ PLOTS_DIR = LOGS_DIR / "plots"
 
 NAV_CONFIGS: List[Dict[str, Any]] = [
     {"id": "A", "label": "Short flat\n(3–6b, 0obs)",
-     "min_dist": 3.0,  "max_dist": 6.0,  "num_obstacles": 0, "task": "navigation"},
+     "min_dist": 3.0,  "max_dist": 6.0,  "num_obstacles": 0, "task": "navigation",
+     "train_dist": False},
     {"id": "B", "label": "Medium 1obs\n(5–9b, 1obs)",
-     "min_dist": 5.0,  "max_dist": 9.0,  "num_obstacles": 1, "task": "navigation"},
+     "min_dist": 5.0,  "max_dist": 9.0,  "num_obstacles": 1, "task": "navigation",
+     "train_dist": False},
     {"id": "C", "label": "Default train\n(7–14b, 2obs)",
-     "min_dist": 7.0,  "max_dist": 14.0, "num_obstacles": 2, "task": "navigation"},
+     "min_dist": 7.0,  "max_dist": 14.0, "num_obstacles": 2, "task": "navigation",
+     "train_dist": True},
     {"id": "D", "label": "Long flat\n(12–18b, 0obs)",
-     "min_dist": 12.0, "max_dist": 18.0, "num_obstacles": 0, "task": "navigation"},
+     "min_dist": 12.0, "max_dist": 18.0, "num_obstacles": 0, "task": "navigation",
+     "train_dist": False},
     {"id": "E", "label": "Short dense\n(3–6b, 2obs)",
-     "min_dist": 3.0,  "max_dist": 6.0,  "num_obstacles": 2, "task": "navigation"},
+     "min_dist": 3.0,  "max_dist": 6.0,  "num_obstacles": 2, "task": "navigation",
+     "train_dist": False},
     {"id": "F", "label": "Very long 3obs\n(14–20b, 3obs)",
-     "min_dist": 14.0, "max_dist": 20.0, "num_obstacles": 3, "task": "navigation"},
+     "min_dist": 14.0, "max_dist": 20.0, "num_obstacles": 3, "task": "navigation",
+     "train_dist": False},
 ]
 
 # ------------------------------------------------------------------
@@ -58,20 +64,27 @@ NAV_CONFIGS: List[Dict[str, Any]] = [
 
 FARMING_CONFIGS: List[Dict[str, Any]] = [
     {"id": "G", "label": "1 crop\nharvest-only",
-     "num_crops": 1,  "full_farm_cycle": False, "task": "farming"},
+     "num_crops": 1,  "full_farm_cycle": False, "task": "farming",
+     "train_dist": False},
     {"id": "H", "label": "3 crops\nharvest-only",
-     "num_crops": 3,  "full_farm_cycle": False, "task": "farming"},
+     "num_crops": 3,  "full_farm_cycle": False, "task": "farming",
+     "train_dist": False},
     {"id": "I", "label": "5 crops\nharvest-only (train)",
-     "num_crops": 5,  "full_farm_cycle": False, "task": "farming"},
+     "num_crops": 5,  "full_farm_cycle": False, "task": "farming",
+     "train_dist": True},
     {"id": "J", "label": "5 crops\nfull cycle",
-     "num_crops": 5,  "full_farm_cycle": True,  "task": "farming"},
+     "num_crops": 5,  "full_farm_cycle": True,  "task": "farming",
+     "train_dist": False},
     {"id": "K", "label": "10 crops\nharvest-only",
-     "num_crops": 10, "full_farm_cycle": False, "task": "farming"},
+     "num_crops": 10, "full_farm_cycle": False, "task": "farming",
+     "train_dist": False},
     # Additional held-out configs not seen during training
     {"id": "L", "label": "7 crops\nharvest-only",
-     "num_crops": 7,  "full_farm_cycle": False, "task": "farming"},
+     "num_crops": 7,  "full_farm_cycle": False, "task": "farming",
+     "train_dist": False},
     {"id": "M", "label": "3 crops\nfull cycle",
-     "num_crops": 3,  "full_farm_cycle": True,  "task": "farming"},
+     "num_crops": 3,  "full_farm_cycle": True,  "task": "farming",
+     "train_dist": False},
 ]
 
 
@@ -131,7 +144,7 @@ def evaluate_config(
         "avg_crops":    round(total_crops  / n_episodes, 2),
         "avg_mobs":     round(total_mobs   / n_episodes, 2),
         "n_episodes":   n_episodes,
-        "train_dist":   config.get("id") in ("C", "I"),
+        "train_dist":   bool(config.get("train_dist", False)),
     }
 
 

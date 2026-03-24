@@ -47,8 +47,8 @@ public class ActionExecutor {
     private static final float   PITCH_MAX      = 45.0f;
     private static final float   PITCH_MIN      = -30.0f;
 
-    // Combat
-    private static final double  ATTACK_RANGE   = 3.5;
+    // Combat — package-visible so EnvironmentManager.computeActionMask can use it
+    static final double  ATTACK_RANGE   = 3.5;
 
     // Surface scan depth — FIX 2.10: was 3, now 8 to handle terrain drops
     private static final int     SURFACE_SCAN_DEPTH = 8;
