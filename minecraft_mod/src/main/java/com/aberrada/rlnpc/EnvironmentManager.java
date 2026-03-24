@@ -94,7 +94,10 @@ public class EnvironmentManager {
                                      int     numObstacles,
                                      int     numCrops,
                                      boolean fullFarmCycle,
-                                     int     seed) {
+                                     int     seed,
+                                     int     numMobs,
+                                     double  mobDistMin,
+                                     double  mobDistMax) {
         // FIX 3.7: seed the Java RNG so episodes are reproducible
         if (seed >= 0) rng.setSeed(seed);
 
@@ -139,10 +142,20 @@ public class EnvironmentManager {
                         spawnZ = (rng.nextDouble() - 0.5) * 2.0;
                         spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
                         TaskSetup.placeNavigationMarker(level, state);
-                        spawnCombatMobs(level, spawnX, spawnZ, MOB_COUNT_PER_EP);
+                        // Fix 4.5: use curriculum-controlled mob count/distance (-1 = defaults)
+                        int   cCount   = numMobs    > 0   ? numMobs    : MOB_COUNT_PER_EP;
+                        double cDistMin = mobDistMin >= 0.0 ? mobDistMin : 6.0;
+                        double cDistMax = mobDistMax >= 0.0 ? mobDistMax : 10.0;
+                        spawnCombatMobs(level, spawnX, spawnZ, cCount, cDistMin, cDistMax);
                     }
                     case "multitask" -> {
                         TaskSetup.configureNavigation(level, state, rng);
+                        // FIX 4.1: save the nav waypoint BEFORE configureFarming
+                        // overwrites state.targetX/Z with the first crop position.
+                        // The gold-block marker and the success condition both use
+                        // navTargetX/Z so they remain consistent throughout.
+                        state.navTargetX = state.targetX;
+                        state.navTargetZ = state.targetZ;
                         int nc = numCrops > 0 ? numCrops : DEFAULT_CROP_COUNT;
                         TaskSetup.configureFarming(level, state, nc, fullFarmCycle, rng);
                         state.updateActiveCrop(0, 0);
@@ -150,7 +163,7 @@ public class EnvironmentManager {
                         spawnZ = (rng.nextDouble() - 0.5) * 3.0;
                         spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
                         TaskSetup.placeNavigationMarker(level, state);
-                        spawnCombatMobs(level, spawnX, spawnZ, 2);
+                        spawnCombatMobs(level, spawnX, spawnZ, 2, 6.0, 10.0);
                     }
                     default -> {   // navigation
                         TaskSetup.configureNavigation(level, state, rng);
@@ -251,6 +264,11 @@ public class EnvironmentManager {
 
                 state.health = agent.getHealth();
                 state.isDead = !agent.isAlive() || agent.getHealth() <= 0;
+
+                // Fix 4.3: track nearest mob distance for combat proximity reward
+                if ("combat".equals(state.taskName) || "multitask".equals(state.taskName)) {
+                    state.nearestMobDist = computeNearestMobDist(level, agent);
+                }
 
                 if ("farming".equals(state.taskName) || "multitask".equals(state.taskName)) {
                     state.updateActiveCrop(agent.getX(), agent.getZ());
@@ -388,11 +406,12 @@ public class EnvironmentManager {
     // Combat mob spawning
     // ------------------------------------------------------------------
 
-    private void spawnCombatMobs(ServerLevel level, double cx, double cz, int count) {
+    private void spawnCombatMobs(ServerLevel level, double cx, double cz, int count,
+                                     double distMin, double distMax) {
         state.hostileMobUuids.clear();
         for (int i = 0; i < count; i++) {
             double angle = rng.nextDouble() * 2 * Math.PI;
-            double dist  = 6.0 + rng.nextDouble() * 4.0;
+            double dist  = distMin + rng.nextDouble() * Math.max(0.0, distMax - distMin);
             double mx = cx + Math.cos(angle) * dist;
             double mz = cz + Math.sin(angle) * dist;
             double my = TaskSetup.resolveStandY(level, mx, mz);
@@ -430,10 +449,37 @@ public class EnvironmentManager {
                         Entity e = level.getEntity(uuid);
                         return e == null || !e.isAlive();
                     });
+            // FIX 4.1: use navTargetX/Z (the gold-block position) so the visual
+            // goal and the success condition are the same location.  Previously
+            // this used distanceToCurrentTarget() which, by episode end, pointed
+            // at the last harvested crop — meaning the agent got success credit
+            // immediately on the last harvest without reaching the gold block.
             case "multitask" -> state.allCropsHarvested()
-                    && distanceToCurrentTarget(agent) <= NAV_SUCCESS_DIST;
+                    && distanceToNavTarget(agent) <= NAV_SUCCESS_DIST;
             default          -> distanceToCurrentTarget(agent) <= NAV_SUCCESS_DIST;
         };
+    }
+
+    /**
+     * Returns true when the block directly in front of the agent is a
+     * CropBlock that has NOT yet reached max age (i.e., not harvestable).
+     * Used by the action mask to allow bonemeal application in full-cycle
+     * farming mode. (Fix 4.2a)
+     */
+    private boolean isImmatureCropAhead(RLNpcEntity agent) {
+        ServerLevel level = getOverworld();
+        if (level == null) return false;
+        BlockPos pos = ObservationBuilder.frontCropPos(agent);
+        BlockState bs = level.getBlockState(pos);
+        return bs.getBlock() instanceof net.minecraft.world.level.block.CropBlock cb
+                && !cb.isMaxAge(bs);
+    }
+
+    /** Distance to the permanent nav waypoint (gold block). Used for multitask. */
+    private double distanceToNavTarget(RLNpcEntity agent) {
+        double dx = state.navTargetX - agent.getX();
+        double dz = state.navTargetZ - agent.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
     }
 
     // ------------------------------------------------------------------
@@ -603,10 +649,18 @@ public class EnvironmentManager {
         boolean[] mask = new boolean[13];
         java.util.Arrays.fill(mask, true);   // default: all valid
 
-        // Action 3 — interact: only valid when facing a mature crop
+        // Action 3 — interact:
+        //   • always valid when facing a mature (harvestable) crop
+        //   • FIX 4.2a: also valid in full-cycle farming when facing an
+        //     IMMATURE crop and the agent has bonemeal.  The previous mask
+        //     blocked this entirely, making bonemeal application unlearnable.
         boolean farmingTask = "farming".equals(state.taskName)
                            || "multitask".equals(state.taskName);
-        mask[3] = farmingTask && ObservationBuilder.isMatureCropInFront(agent);
+        boolean matureCropAhead = farmingTask && ObservationBuilder.isMatureCropInFront(agent);
+        boolean bonemealApplicable = farmingTask && state.fullFarmingCycle
+                && isImmatureCropAhead(agent)
+                && InventoryManager.hasBonemeal(agent);
+        mask[3] = matureCropAhead || bonemealApplicable;
 
         // Action 5 — jump: only valid when a 1-block wall is ahead AND passable above
         mask[5] = ObservationBuilder.is1BlockObstacleAhead(agent);
@@ -620,8 +674,14 @@ public class EnvironmentManager {
                         m -> m.isAlive() && !m.isSpectator());
         mask[10] = !mobs.isEmpty();
 
-        // Action 11 — eat: only valid when hungry AND food is available
+        // Action 11 — eat: only valid when hungry, food slot is not empty,
+        // AND the food slot is currently active.  FIX 4.2b: InventoryManager
+        // .eatFood() eats from the active item; if the sword is held the eat
+        // action returns false (invalid), so the mask must require the correct
+        // active slot to prevent the agent from collecting the invalid penalty
+        // for eating while holding the wrong item.
         mask[11] = state.foodLevel < 20
+                && state.activeSlot == EpisodeState.SLOT_FOOD
                 && !agent.getInventory()
                          .getItem(InventoryManager.SLOT_FOOD).isEmpty();
 
@@ -629,8 +689,25 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
-    // Distance helper
+    // Distance helpers
     // ------------------------------------------------------------------
+
+    /**
+     * Euclidean distance from the agent to the nearest alive hostile mob.
+     * Returns {@link Double#MAX_VALUE} when no mobs are tracked.
+     * (Fix 4.3 — used by RewardCalculator for combat proximity reward)
+     */
+    private double computeNearestMobDist(ServerLevel level, RLNpcEntity agent) {
+        double best = Double.MAX_VALUE;
+        for (UUID uuid : state.hostileMobUuids) {
+            Entity e = level.getEntity(uuid);
+            if (e != null && e.isAlive()) {
+                double d = agent.distanceTo(e);
+                if (d < best) best = d;
+            }
+        }
+        return best;
+    }
 
     private double distanceToCurrentTarget(RLNpcEntity agent) {
         double dx = state.targetX - agent.getX();

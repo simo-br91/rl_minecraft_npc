@@ -72,6 +72,9 @@ public class RewardCalculator {
     private static final double ALL_KILLED_BONUS  = 10.0;
     private static final double DEATH_PENALTY     = -5.0;
     private static final double SPRINT_FOOD_COST  = -0.005;
+    /** Proximity incentive: reward for staying within melee range of a mob. (Fix 4.3) */
+    private static final double MOB_PROXIMITY_BONUS = 0.05;
+    private static final double MOB_PROXIMITY_RANGE = ActionExecutor.ATTACK_RANGE + 0.5;
 
     public static double compute(
             RLNpcEntity  agent,
@@ -150,15 +153,27 @@ public class RewardCalculator {
         r += TIME_PENALTY;
 
         boolean nearCrop = after <= 1.10;
-        if (nearCrop)    r += NEAR_CROP_BONUS;
+        // FIX 4.4a: NEAR_CROP_BONUS only fires when the agent is actively
+        // closing distance (after < before - 0.005).  Previously it fired
+        // every step within 1.10 blocks regardless of movement direction,
+        // creating a local optimum of orbiting the crop at constant range
+        // without harvesting.
+        if (nearCrop && after < before - 0.005) r += NEAR_CROP_BONUS;
         if (cropInFront) r += CROP_FRONT_BONUS;
 
         // FIX 5.2: drift penalty when very close to crop
         if (before <= 1.15 && after > before) r += NEAR_TARGET_DRIFT_PENALTY;
 
         if (action == 3) {
-            if (cropInFront) r += PRE_HARVEST_BONUS;
-            else             r += INTERACT_MISS;
+            // FIX 4.4b: PRE_HARVEST_BONUS and HARVEST_BONUS both fired on the
+            // same successful interact step (total +6.0), because cropInFront
+            // and lastInteractValid were always both true when a harvest succeeded.
+            // The per-step CROP_FRONT_BONUS already incentivises facing the crop;
+            // PRE_HARVEST is now suppressed on the harvest step to prevent
+            // double-counting.  On a genuine "interact while facing ripe crop but
+            // harvest failed" edge case, PRE_HARVEST still fires as intended.
+            if (cropInFront && !state.lastInteractValid) r += PRE_HARVEST_BONUS;
+            else if (!cropInFront)                       r += INTERACT_MISS;
         }
         if (state.lastInteractValid) r += HARVEST_BONUS;
         if (success)                 r += ALL_HARVEST_BONUS;
@@ -182,6 +197,12 @@ public class RewardCalculator {
         if (state.isDead)          r += DEATH_PENALTY;
         if (success)               r += ALL_KILLED_BONUS;
         if (!valid)                r += INVALID_PENALTY;
+        // Fix 4.3: proximity bonus — small per-step reward for staying in
+        // melee range.  Without this there is no shaping toward mobs; the
+        // agent only earns rewards when it attacks (requires cooldown) or
+        // kills (delayed).  The bonus counteracts the incentive to kite away
+        // from mobs to avoid the -1.0 damage penalty.
+        if (state.nearestMobDist <= MOB_PROXIMITY_RANGE) r += MOB_PROXIMITY_BONUS;
         // FIX 3.4: Stuck penalty removed for combat.
         // The stuck counter is based on nav-target distance, which barely
         // changes when the agent is fighting in place — a completely valid
