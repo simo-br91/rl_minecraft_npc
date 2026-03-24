@@ -19,12 +19,28 @@ import java.util.Random;
  * - Artifact cleanup between episodes
  *
  * Extracted from EnvironmentManager to reduce the God-class.
+ *
+ * Y-resolution API (single source of truth):
+ *   resolveGroundY   → the Y of the top solid block (i.e., the surface block itself)
+ *   resolveStandY    → resolveGroundY + 1  (where the agent's feet go)
+ *   getReferenceGroundY → integer version of resolveGroundY for block placement
+ *
+ * All three delegate to the same heightmap query.
  */
 public class TaskSetup {
 
+    // ------------------------------------------------------------------
+    // Constants
+    // ------------------------------------------------------------------
+
     private static final int    MAX_CROPS          = 10;
+    private static final int    MAX_OBSTACLES       = 3;
     private static final double NAV_DEFAULT_MIN    = 7.0;
     private static final double NAV_DEFAULT_MAX    = 14.0;
+
+    // Minimum safe clearance between an obstacle and spawn / target
+    private static final double OBSTACLE_SPAWN_CLEARANCE  = 2.0;
+    private static final double OBSTACLE_TARGET_CLEARANCE = 2.0;
 
     // ------------------------------------------------------------------
     // Navigation
@@ -41,16 +57,25 @@ public class TaskSetup {
         state.targetZ = Math.round(Math.sin(angle) * dist);
         state.targetY = resolveGroundY(level, state.targetX, state.targetZ) + 1.0;
 
-        // Scale maxSteps with distance
+        // Scale maxSteps linearly with target distance
         int base = (int)(dist * 15);
         state.maxSteps = Math.max(100, Math.min(300, base));
     }
 
     public static void placeNavigationObstacles(ServerLevel level, EpisodeState state,
                                                  double spawnX, double spawnZ, Random rng) {
-        int count = state.curriculumNumObstacles >= 0
+        int requested = state.curriculumNumObstacles >= 0
                 ? state.curriculumNumObstacles
                 : 1 + rng.nextInt(2);
+
+        // Cap at MAX_OBSTACLES and log a warning if clipped
+        int count = requested;
+        if (count > MAX_OBSTACLES) {
+            RLNpcMod.LOGGER.warn(
+                "placeNavigationObstacles: requested {} obstacles but max is {}; capping.",
+                requested, MAX_OBSTACLES);
+            count = MAX_OBSTACLES;
+        }
         if (count == 0) return;
 
         double dx   = state.targetX - spawnX;
@@ -58,6 +83,7 @@ public class TaskSetup {
         double dist = Math.sqrt(dx * dx + dz * dz);
         if (dist < 4.0) return;
 
+        // Place obstacles at evenly-spaced fractions along the path, with jitter
         double[] fracs = {0.30, 0.50, 0.65, 0.80};
         int placed = 0;
         for (int i = 0; i < fracs.length && placed < count; i++) {
@@ -66,12 +92,15 @@ public class TaskSetup {
             int oz = (int) Math.round(spawnZ + dz * frac);
             int gy = getReferenceGroundY(level, ox, oz);
 
-            // Avoid target and spawn
+            // Reject positions too close to the target OR to the spawn point
             double wallDistTarget = Math.sqrt(Math.pow(ox - state.targetX, 2)
                                             + Math.pow(oz - state.targetZ, 2));
             double wallDistSpawn  = Math.sqrt(Math.pow(ox - spawnX, 2)
                                             + Math.pow(oz - spawnZ, 2));
-            if (wallDistTarget < 2.0 || wallDistSpawn < 2.0) continue;
+            if (wallDistTarget < OBSTACLE_TARGET_CLEARANCE
+             || wallDistSpawn  < OBSTACLE_SPAWN_CLEARANCE) {
+                continue;
+            }
 
             BlockPos wallPos = new BlockPos(ox, gy + 1, oz);
             level.setBlockAndUpdate(wallPos, Blocks.STONE.defaultBlockState());
@@ -86,9 +115,10 @@ public class TaskSetup {
 
     /**
      * Configure farming task.
-     * @param numCrops      How many wheat plots to create (1–MAX_CROPS).
-     * @param fullCycle     If true, place dirt+farmland and seeds (not pre-grown).
-     *                      If false, place pre-grown wheat immediately.
+     *
+     * @param numCrops   How many wheat plots to create (1–MAX_CROPS).
+     * @param fullCycle  If true, place seeds (age=0) so the agent must
+     *                   use bonemeal or wait.  If false, crops are pre-grown.
      */
     public static void configureFarming(ServerLevel level, EpisodeState state,
                                          int numCrops, boolean fullCycle, Random rng) {
@@ -113,17 +143,15 @@ public class TaskSetup {
             BlockPos soilPos = new BlockPos(cx, groundY, cz);
             BlockPos cropPos = soilPos.above();
 
-            // Place farmland
             level.setBlockAndUpdate(soilPos, Blocks.FARMLAND.defaultBlockState());
 
+            CropBlock wheat = (CropBlock) Blocks.WHEAT;
             if (fullCycle) {
-                // Plant seeds (age=0), agent must use bonemeal or wait
-                CropBlock wheat = (CropBlock) Blocks.WHEAT;
+                // Plant seeds (age=0) — agent must use bonemeal or wait for growth
                 level.setBlockAndUpdate(cropPos, wheat.getStateForAge(0));
                 state.cropGrowthStages.add(0);
             } else {
-                // Pre-grown wheat
-                CropBlock wheat = (CropBlock) Blocks.WHEAT;
+                // Pre-grown wheat (age=max) — harvest immediately
                 level.setBlockAndUpdate(cropPos, wheat.getStateForAge(wheat.getMaxAge()));
                 state.cropGrowthStages.add(wheat.getMaxAge());
             }
@@ -133,7 +161,7 @@ public class TaskSetup {
             state.cropHarvested.add(false);
         }
 
-        // Set initial target to nearest crop from origin
+        // Set initial navigation target to the first crop
         if (!state.farmingCropPositions.isEmpty()) {
             BlockPos first = state.farmingCropPositions.get(0);
             state.targetX = first.getX() + 0.5;
@@ -142,14 +170,14 @@ public class TaskSetup {
             state.activeCropIndex = 0;
         }
 
+        // Budget: base steps + extra per crop (more crops = more walking)
         state.maxSteps = 150 + numCrops * 80;
     }
 
-    /** Generate distinct crop positions spread around the center. */
+    /** Generate distinct crop positions in a grid with random jitter. */
     private static List<int[]> generateCropPositions(int cx, int cz, int n, Random rng) {
         List<int[]> result = new ArrayList<>();
-        // Use a grid layout with random jitter
-        int cols = (int) Math.ceil(Math.sqrt(n));
+        int cols    = (int) Math.ceil(Math.sqrt(n));
         int spacing = 3;
         for (int i = 0; i < n; i++) {
             int row = i / cols;
@@ -173,8 +201,8 @@ public class TaskSetup {
         for (BlockPos soilPos : state.farmingSoilPositions) {
             if (soilPos != null) {
                 BlockPos cropPos = soilPos.above();
-                level.setBlockAndUpdate(cropPos,  Blocks.AIR.defaultBlockState());
-                level.setBlockAndUpdate(soilPos,  Blocks.GRASS_BLOCK.defaultBlockState());
+                level.setBlockAndUpdate(cropPos, Blocks.AIR.defaultBlockState());
+                level.setBlockAndUpdate(soilPos, Blocks.GRASS_BLOCK.defaultBlockState());
             }
         }
         state.farmingSoilPositions.clear();
@@ -193,12 +221,12 @@ public class TaskSetup {
     // ------------------------------------------------------------------
 
     /**
-     * Apply bonemeal to the crop at cropPos: advance growth stage by 1–3.
+     * Apply bonemeal to the crop at cropPos: advance growth stage by 1–2.
      * Returns true if growth happened, false if already max age.
      */
     public static boolean applyBonemeal(ServerLevel level, EpisodeState state, int cropIndex) {
         if (cropIndex < 0 || cropIndex >= state.farmingCropPositions.size()) return false;
-        BlockPos pos = state.farmingCropPositions.get(cropIndex);
+        BlockPos pos   = state.farmingCropPositions.get(cropIndex);
         var block = level.getBlockState(pos);
         if (!(block.getBlock() instanceof CropBlock crop)) return false;
         if (crop.isMaxAge(block)) return false;
@@ -219,7 +247,7 @@ public class TaskSetup {
 
     public static void placeNavigationMarker(ServerLevel level, EpisodeState state) {
         int mx = (int) Math.floor(state.targetX);
-        int gy = (int) Math.floor(resolveGroundY(level, state.targetX, state.targetZ));
+        int gy = getReferenceGroundY(level, (int) state.targetX, (int) state.targetZ);
         int mz = (int) Math.floor(state.targetZ);
         BlockPos markerPos = new BlockPos(mx, gy + 1, mz);
         level.setBlockAndUpdate(markerPos, Blocks.GOLD_BLOCK.defaultBlockState());
@@ -227,29 +255,34 @@ public class TaskSetup {
     }
 
     // ------------------------------------------------------------------
-    // Y resolution helpers (single implementation)
+    // Y-resolution helpers — single implementation, three access points
     // ------------------------------------------------------------------
 
     /**
-     * Returns the Y coordinate of the top solid surface block at (x,z).
-     * Agent should stand at groundY + 1.
+     * Returns the Y coordinate of the top solid surface block at (x, z).
+     * This is the Y of the block itself — the agent stands at groundY + 1.
      */
     public static double resolveGroundY(ServerLevel level, double x, double z) {
-        BlockPos top = level.getHeightmapPos(
-                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-                new BlockPos((int) Math.round(x), 0, (int) Math.round(z)));
-        return top.getY() - 1.0;
+        return (double) getReferenceGroundY(level, (int) Math.round(x), (int) Math.round(z));
     }
 
-    /** Returns Y the agent should be positioned at (standing on top of surface). */
+    /**
+     * Returns the Y coordinate where the agent should stand at (x, z).
+     * Equals resolveGroundY(x, z) + 1.
+     */
     public static double resolveStandY(ServerLevel level, double x, double z) {
         return resolveGroundY(level, x, z) + 1.0;
     }
 
-    /** Integer version for block placement. */
+    /**
+     * Returns the integer Y of the top solid surface block.
+     * Use this for block placement (e.g., obstacle Y = groundY + 1).
+     */
     public static int getReferenceGroundY(ServerLevel level, int x, int z) {
         BlockPos top = level.getHeightmapPos(
                 Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, new BlockPos(x, 0, z));
+        // getHeightmapPos returns the first non-solid block above the surface,
+        // so the surface block itself is at top.getY() - 1.
         return top.getY() - 1;
     }
 }

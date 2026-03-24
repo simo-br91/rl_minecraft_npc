@@ -6,38 +6,42 @@ Only terminal signals: +10 on success, tiny step penalty.
 
 Use this to compare against the shaped-reward baseline in
 compare_experiments.py.
+
+Reads all hyperparameters from python_rl/configs/nav_sparse.yaml.
+Key difference from shaped: ent_coef=0.10 (higher entropy to
+encourage exploration when reward signal is near-zero most episodes).
 """
 
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 
-from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback
 
 from python_rl.env.minecraft_env import MinecraftEnv
+from python_rl.train.train_utils import (
+    SuccessLogger,
+    EarlyStoppingCallback,
+    make_periodic_checkpoint,
+    load_config,
+    load_model_with_warmstart,
+)
 
 
 # ------------------------------------------------------------------
-# Callback: log per-episode success to a separate CSV
+# Thin env wrapper — injects sparse_reward=True on every reset
 # ------------------------------------------------------------------
 
-class SuccessLogger(BaseCallback):
-    """Appends (timestep, success) to a CSV after each episode ends."""
+class SparseNavEnv(MinecraftEnv):
+    """Forces sparse_reward=True on every reset, regardless of options."""
 
-    def __init__(self, log_path: str, verbose: int = 0) -> None:
-        super().__init__(verbose)
-        self._log_path = Path(log_path)
-        self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._log_path.open("w") as f:
-            f.write("timestep,success\n")
-
-    def _on_step(self) -> bool:
-        for done, info in zip(self.locals["dones"], self.locals["infos"]):
-            if done:
-                success = int(info.get("success", False))
-                with self._log_path.open("a") as f:
-                    f.write(f"{self.num_timesteps},{success}\n")
-        return True
+    def reset(self, seed=None, options=None):
+        opts = dict(options or {})
+        opts.setdefault("task", "navigation")
+        opts["sparse_reward"] = True
+        return super().reset(seed=seed, options=opts)
 
 
 # ------------------------------------------------------------------
@@ -45,51 +49,58 @@ class SuccessLogger(BaseCallback):
 # ------------------------------------------------------------------
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Train navigation with sparse rewards.")
+    parser.add_argument("--config", default="nav_sparse",
+                        help="YAML config name under python_rl/configs/")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from existing nav_sparse_run1 checkpoint.")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+
     logs_dir        = Path("python_rl/logs")
     checkpoints_dir = Path("python_rl/checkpoints")
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sparse reward is requested via reset options injected by a wrapper
-    class SparseNavEnv(MinecraftEnv):
-        """Thin override: always adds sparse_reward=True to reset options."""
-        def reset(self, seed=None, options=None):
-            opts = dict(options or {})
-            opts.setdefault("task",         "navigation")
-            opts["sparse_reward"] = True
-            return super().reset(seed=seed, options=opts)
+    success_log = str(logs_dir / cfg.get("success_log", "nav_sparse_success.csv"))
 
     base_env = SparseNavEnv()
-    env      = Monitor(base_env, filename=str(logs_dir / "nav_sparse_monitor.csv"))
+    env      = Monitor(base_env,
+                       filename=str(logs_dir / cfg.get("monitor_log",
+                                                        "nav_sparse_monitor.csv")))
 
-    success_callback = SuccessLogger(str(logs_dir / "nav_sparse_success.csv"))
-
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        verbose=1,
-        n_steps=2048,
-        batch_size=256,
-        n_epochs=10,
-        learning_rate=3e-4,
-        gamma=0.99,
-        gae_lambda=0.95,
-        # Higher entropy is critical for sparse rewards — the agent must
-        # explore extensively before stumbling on its first success.
-        ent_coef=0.10,
-        clip_range=0.2,
-        policy_kwargs=dict(net_arch=[256, 256]),
-        tensorboard_log=str(logs_dir / "tb"),
+    success_cb    = SuccessLogger(success_log)
+    checkpoint_cb = make_periodic_checkpoint(
+        str(checkpoints_dir / "nav_sparse_checkpoints"),
+        prefix="nav_sparse",
+    )
+    # Sparse training needs more episodes to converge — higher patience.
+    early_stop_cb = EarlyStoppingCallback(
+        success_log_path=success_log,
+        target_success_rate=0.85,
+        window=50,
+        patience=5,
     )
 
-    model.learn(total_timesteps=200_000, callback=success_callback)
-    model.save(str(checkpoints_dir / "nav_sparse_run1"))
+    warmstart = [checkpoints_dir / cfg.get("checkpoint_name", "nav_sparse_run1")] \
+        if args.resume else []
+    model = load_model_with_warmstart(warmstart, env, cfg, str(logs_dir))
+
+    model.learn(
+        total_timesteps=cfg.get("total_timesteps", 200_000),
+        callback=CallbackList([success_cb, checkpoint_cb, early_stop_cb]),
+        reset_num_timesteps=not args.resume,
+    )
+
+    ckpt = cfg.get("checkpoint_name", "nav_sparse_run1")
+    model.save(str(checkpoints_dir / ckpt))
     env.close()
 
     print("Sparse-reward navigation training complete.")
-    print("Checkpoint : python_rl/checkpoints/nav_sparse_run1")
-    print("Monitor CSV: python_rl/logs/nav_sparse_monitor.csv")
-    print("Success CSV: python_rl/logs/nav_sparse_success.csv")
+    print(f"Checkpoint : python_rl/checkpoints/{ckpt}")
+    print(f"Monitor CSV: python_rl/logs/{cfg.get('monitor_log', 'nav_sparse_monitor.csv')}")
+    print(f"Success CSV: python_rl/logs/{cfg.get('success_log', 'nav_sparse_success.csv')}")
 
 
 if __name__ == "__main__":

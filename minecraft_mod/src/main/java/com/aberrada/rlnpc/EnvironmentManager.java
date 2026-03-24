@@ -35,21 +35,32 @@ import java.util.concurrent.TimeUnit;
  *  - HTTP JSON serialization
  *  - Night/day control, mob spawning
  *
- * Intentionally kept lean — most logic lives in helper classes.
+ * Changes vs previous version:
+ *  - Sparse mode: truncates episode when stuckSteps >= SPARSE_STUCK_TRUNCATE_LIMIT
+ *    rather than waiting for maxSteps (avoids wasting rollout budget).
+ *  - Dead agent entity leak fixed: getOrCreateAgent() removes stale dead
+ *    entities before creating a new one.
+ *  - Removed unused notifyPlayer() method.
  */
 public class EnvironmentManager {
 
     // ------------------------------------------------------------------
     // Episode constants
     // ------------------------------------------------------------------
-    private static final double NAV_SUCCESS_DIST   = 1.5;
-    private static final double FARM_SUCCESS_DIST  = 1.05;
-    private static final double STUCK_EPS          = 0.01;
-    private static final int    STUCK_LIMIT        = 8;
-    private static final double MAX_EPISODE_DIST   = 35.0;
-    private static final double COMBAT_CLEAR_DIST  = 12.0;
-    private static final int    DEFAULT_CROP_COUNT = 5;
-    private static final int    MOB_COUNT_PER_EP   = 3;
+    private static final double NAV_SUCCESS_DIST         = 1.5;
+    private static final double FARM_SUCCESS_DIST        = 1.05;
+    private static final double STUCK_EPS                = 0.01;
+    private static final int    STUCK_LIMIT              = 8;
+    private static final double MAX_EPISODE_DIST         = 35.0;
+    private static final int    DEFAULT_CROP_COUNT       = 5;
+    private static final int    MOB_COUNT_PER_EP         = 3;
+
+    /**
+     * In sparse-reward mode, auto-truncate if the agent is stuck for this
+     * many consecutive steps.  Without this, the agent just runs out maxSteps
+     * doing nothing useful, wasting rollout budget.
+     */
+    private static final int    SPARSE_STUCK_TRUNCATE_LIMIT = 20;
 
     // ------------------------------------------------------------------
     // Fields
@@ -61,7 +72,6 @@ public class EnvironmentManager {
     public EnvironmentManager(MinecraftServer server) {
         this.server = server;
         this.state  = new EpisodeState();
-        // Apply world settings once server is available
         server.execute(this::applyWorldSettings);
     }
 
@@ -111,7 +121,6 @@ public class EnvironmentManager {
                         spawnX = state.targetX + (rng.nextDouble() - 0.5) * 8.0;
                         spawnZ = state.targetZ + (rng.nextDouble() - 0.5) * 8.0;
                         spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
-                        // No navigation marker for farming
                     }
                     case "combat" -> {
                         TaskSetup.configureNavigation(level, state, rng);
@@ -122,11 +131,9 @@ public class EnvironmentManager {
                         spawnCombatMobs(level, spawnX, spawnZ, MOB_COUNT_PER_EP);
                     }
                     case "multitask" -> {
-                        // Set up both navigation target, crops, and mobs
                         TaskSetup.configureNavigation(level, state, rng);
                         int nc = numCrops > 0 ? numCrops : DEFAULT_CROP_COUNT;
                         TaskSetup.configureFarming(level, state, nc, fullFarmingCycle, rng);
-                        // Override navigation target after farming (nearest crop)
                         state.updateActiveCrop(0, 0);
                         spawnX = (rng.nextDouble() - 0.5) * 3.0;
                         spawnZ = (rng.nextDouble() - 0.5) * 3.0;
@@ -146,14 +153,13 @@ public class EnvironmentManager {
 
                 placeAgent(agent, spawnX, spawnY, spawnZ, spawnYaw);
 
-                // Set natural pitch toward target
-                state.targetPitch = computeNaturalPitch(agent, state);
+                state.targetPitch  = computeNaturalPitch(agent, state);
                 state.currentPitch = state.targetPitch;
 
                 double initDist = distanceToCurrentTarget(agent);
                 state.reset(initDist);
 
-                double[]          obs  = ObservationBuilder.build(agent, state);
+                double[]           obs  = ObservationBuilder.build(agent, state);
                 Map<String,Object> info = buildInfo(false, initDist, 0.0);
                 future.complete(jsonResponse(obs, 0.0, false, false, info));
             } catch (Exception e) {
@@ -183,7 +189,8 @@ public class EnvironmentManager {
                 if (state.done) {
                     double cd = distanceToCurrentTarget(agent);
                     future.complete(jsonResponse(ObservationBuilder.build(agent, state),
-                            0.0, true, false, buildInfo(state.success, cd, taskProgress(agent))));
+                            0.0, true, false,
+                            buildInfo(state.success, cd, taskProgress(agent))));
                     return;
                 }
 
@@ -196,7 +203,6 @@ public class EnvironmentManager {
                 state.mobsKilled         = 0;
                 state.timesHit           = 0;
 
-                // Handle health/food tick
                 updateHealthAndFood(agent);
 
                 boolean validAction;
@@ -212,7 +218,6 @@ public class EnvironmentManager {
                     validAction = ActionExecutor.applyAction(agent, action, state);
                 }
 
-                // Update pitch toward natural angle
                 state.targetPitch = computeNaturalPitch(agent, state);
                 ActionExecutor.updatePitch(agent, state);
 
@@ -223,21 +228,16 @@ public class EnvironmentManager {
                 if (Math.abs(delta) < STUCK_EPS) state.stuckSteps++;
                 else                              state.stuckSteps = 0;
 
-                // Compute success
                 boolean success   = computeSuccess(level, agent);
-                boolean truncated = state.episodeStep >= state.maxSteps
-                                 || distanceToCurrentTarget(agent) > MAX_EPISODE_DIST
-                                 || state.isDead;
+                boolean truncated = isTruncated(agent);
 
                 state.success = success;
                 state.done    = success || truncated;
                 if (!validAction) state.invalidActionCount++;
 
-                // Sync state health from entity
-                state.health    = agent.getHealth();
-                state.isDead    = !agent.isAlive() || agent.getHealth() <= 0;
+                state.health = agent.getHealth();
+                state.isDead = !agent.isAlive() || agent.getHealth() <= 0;
 
-                // Farming: update active crop if current harvested
                 if ("farming".equals(state.taskName) || "multitask".equals(state.taskName)) {
                     state.updateActiveCrop(agent.getX(), agent.getZ());
                 }
@@ -248,7 +248,7 @@ public class EnvironmentManager {
                         validAction, success, cropInFront);
                 state.prevDistance = afterDist;
 
-                double[]          obs  = ObservationBuilder.build(agent, state);
+                double[]           obs  = ObservationBuilder.build(agent, state);
                 Map<String,Object> info = buildInfo(success, afterDist, taskProgress(agent));
                 future.complete(jsonResponse(obs, reward, state.done, truncated, info));
 
@@ -263,30 +263,43 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
+    // Truncation — unified, includes sparse-mode stuck auto-truncation
+    // ------------------------------------------------------------------
+
+    private boolean isTruncated(RLNpcEntity agent) {
+        if (state.episodeStep >= state.maxSteps)           return true;
+        if (distanceToCurrentTarget(agent) > MAX_EPISODE_DIST) return true;
+        if (state.isDead)                                  return true;
+
+        // In sparse mode: auto-truncate after prolonged stuckness so the
+        // agent doesn't waste the entire episode budget doing nothing.
+        if (state.sparseReward && state.stuckSteps >= SPARSE_STUCK_TRUNCATE_LIMIT) {
+            return true;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
     // Interact handler (farming + bonemeal + tilling)
     // ------------------------------------------------------------------
 
     private boolean handleInteract(ServerLevel level, RLNpcEntity agent) {
-        if (!"farming".equals(state.taskName) && !"multitask".equals(state.taskName)) return false;
+        if (!"farming".equals(state.taskName) && !"multitask".equals(state.taskName))
+            return false;
 
-        // Try to harvest mature crop in front
         BlockPos frontPos = ObservationBuilder.frontCropPos(agent);
         BlockState block  = level.getBlockState(frontPos);
 
         if (block.getBlock() instanceof CropBlock cropBlock && cropBlock.isMaxAge(block)) {
-            // Harvest
             level.destroyBlock(frontPos, true, agent);
-            // Mark this crop as harvested
             markCropHarvested(frontPos);
             state.lastInteractValid = true;
-            // Replant if full farming cycle
             if (state.fullFarmingCycle) {
-                // Find matching soil
                 BlockPos soilPos = frontPos.below();
-                if (level.getBlockState(soilPos).getBlock() instanceof net.minecraft.world.level.block.FarmBlock) {
+                if (level.getBlockState(soilPos).getBlock()
+                        instanceof net.minecraft.world.level.block.FarmBlock) {
                     CropBlock wheat = (CropBlock) Blocks.WHEAT;
                     level.setBlockAndUpdate(frontPos, wheat.getStateForAge(0));
-                    // Re-add to tracking
                     updateCropAfterReplant(frontPos);
                 }
             }
@@ -294,14 +307,14 @@ public class EnvironmentManager {
         }
 
         // Try bonemeal on non-mature crop
-        if (state.fullFarmingCycle && block.getBlock() instanceof CropBlock cb && !cb.isMaxAge(block)) {
+        if (state.fullFarmingCycle
+                && block.getBlock() instanceof CropBlock cb && !cb.isMaxAge(block)) {
             if (InventoryManager.hasBonemeal(agent) && InventoryManager.consumeBonemeal(agent)) {
                 int idx = getCropIndexForPos(frontPos);
                 if (idx >= 0) TaskSetup.applyBonemeal(level, state, idx);
                 return true;
             }
         }
-
         return false;
     }
 
@@ -325,7 +338,6 @@ public class EnvironmentManager {
     }
 
     private void updateCropAfterReplant(BlockPos pos) {
-        // Update growth stage tracking
         int idx = getCropIndexForPos(pos);
         if (idx >= 0 && idx < state.cropGrowthStages.size()) {
             state.cropGrowthStages.set(idx, 0);
@@ -349,18 +361,11 @@ public class EnvironmentManager {
     // ------------------------------------------------------------------
 
     private void updateHealthAndFood(RLNpcEntity agent) {
-        // Sync real health from entity
         state.health = agent.getHealth();
 
-        // Natural food regeneration (simplified)
-        if (state.foodLevel >= 18 && agent.getHealth() < agent.getMaxHealth()) {
-            // Natural regen
-        }
-        // Sprinting costs food
         if (state.lastSprinting && state.foodLevel > 0) {
             state.foodLevel = Math.max(0, state.foodLevel - 1);
         }
-        // Starvation
         if (state.foodLevel == 0 && agent.getHealth() > 1.0f) {
             agent.hurt(agent.damageSources().starve(), 0.5f);
         }
@@ -379,21 +384,14 @@ public class EnvironmentManager {
             double mz = cz + Math.sin(angle) * dist;
             double my = TaskSetup.resolveStandY(level, mx, mz);
 
-            // Alternate zombies and skeletons
-            net.minecraft.world.entity.monster.Monster mob;
-            if (i % 2 == 0) {
-                mob = new Zombie(level);
-            } else {
-                mob = new Skeleton(level);
-            }
+            net.minecraft.world.entity.monster.Monster mob =
+                    (i % 2 == 0) ? new Zombie(level) : new Skeleton(level);
             mob.moveTo(mx, my, mz, (float)(rng.nextDouble() * 360), 0);
-            mob.finalizeSpawn(level, level.getCurrentDifficultyAt(BlockPos.containing(mx, my, mz)),
+            mob.finalizeSpawn(level,
+                    level.getCurrentDifficultyAt(BlockPos.containing(mx, my, mz)),
                     MobSpawnType.MOB_SUMMONED, null, null);
             level.addFreshEntity(mob);
             state.hostileMobUuids.add(mob.getUUID());
-
-            // Register listener for when mob is hurt by our agent
-            RLNpcMod.LOGGER.debug("Spawned mob {} at ({},{},{})", mob.getType().getDescriptionId(), mx, my, mz);
         }
     }
 
@@ -435,9 +433,9 @@ public class EnvironmentManager {
             }
             case "combat" -> {
                 if (state.hostileMobUuids.isEmpty()) yield 1.0;
+                ServerPlayer obs = getObserverPlayer();
                 long aliveMobs = state.hostileMobUuids.stream()
                         .filter(uuid -> {
-                            ServerPlayer obs = getObserverPlayer();
                             if (obs == null) return false;
                             Entity e = obs.serverLevel().getEntity(uuid);
                             return e != null && e.isAlive();
@@ -457,9 +455,8 @@ public class EnvironmentManager {
     // ------------------------------------------------------------------
 
     private float computeNaturalPitch(RLNpcEntity agent, EpisodeState state) {
-        // Look slightly down when near target (crop/marker), up when far
         double dist = distanceToCurrentTarget(agent);
-        if ("farming".equals(state.taskName) && dist < 2.0) return 30.0f;  // look at crop
+        if ("farming".equals(state.taskName) && dist < 2.0) return 30.0f;
         if (dist < 3.0) return 15.0f;
         return 0.0f;
     }
@@ -472,17 +469,16 @@ public class EnvironmentManager {
         ServerPlayer p = getObserverPlayer();
         if (p == null) return;
         ServerLevel level = p.serverLevel();
-        // Always night so mobs don't burn
+        // Always night so mobs don't burn from sunlight
         level.setDayTime(18000L);
-        // Set difficulty to at least Normal so mobs deal damage
         if (level.getDifficulty() == Difficulty.PEACEFUL) {
             server.setDifficulty(Difficulty.NORMAL, true);
         }
         // Disable natural mob spawning (we spawn manually)
         level.getGameRules().getRule(GameRules.RULE_DOMOBSPAWNING).set(false, server);
-        // Keep inventory on death
+        // Keep inventory on death — agent should respawn with gear
         level.getGameRules().getRule(GameRules.RULE_KEEPINVENTORY).set(true, server);
-        // Disable daylight cycle so it stays night
+        // Disable daylight cycle so it stays night permanently
         level.getGameRules().getRule(GameRules.RULE_DAYLIGHT).set(false, server);
     }
 
@@ -493,18 +489,29 @@ public class EnvironmentManager {
     private RLNpcEntity getOrCreateAgent(ServerLevel level) {
         if (state.agentUuid != null) {
             Entity e = level.getEntity(state.agentUuid);
-            if (e instanceof RLNpcEntity npc && npc.isAlive()) return npc;
+            if (e instanceof RLNpcEntity npc && npc.isAlive()) {
+                return npc;
+            }
+            // Entity is dead or missing — remove it to prevent accumulation
+            if (e != null) {
+                e.remove(Entity.RemovalReason.DISCARDED);
+            }
+            state.agentUuid = null;
         }
+        return spawnFreshAgent(level);
+    }
+
+    private RLNpcEntity spawnFreshAgent(ServerLevel level) {
         RLNpcEntity agent = ModEntities.RL_NPC.get().create(level);
         if (agent == null) throw new IllegalStateException("Failed to create RLNpcEntity");
         agent.setCustomName(Component.literal("RL Agent"));
         agent.setCustomNameVisible(true);
-        agent.setInvulnerable(false);  // Can take damage from mobs
+        agent.setInvulnerable(false);
         agent.setNoAi(true);
         agent.setSilent(true);
         agent.setPersistenceRequired();
-        // Give full health
-        agent.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH).setBaseValue(20.0);
+        agent.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH)
+             .setBaseValue(20.0);
         agent.setHealth(20.0f);
         level.addFreshEntity(agent);
         state.agentUuid = agent.getUUID();
@@ -517,8 +524,8 @@ public class EnvironmentManager {
         agent.fallDistance = 0.0f;
         agent.setHealth(20.0f);
         ActionExecutor.syncRotations(agent, yaw, 0.0f);
-        state.health   = 20.0f;
-        state.foodLevel = 20;
+        state.health    = 20.0f;
+        state.foodLevel  = 20;
         state.saturation = 5.0f;
     }
 
@@ -597,7 +604,7 @@ public class EnvironmentManager {
     }
 
     private String escape(String s) {
-        return s.replace("\\","\\\\").replace("\"","\\\"");
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private double round(double v) {
