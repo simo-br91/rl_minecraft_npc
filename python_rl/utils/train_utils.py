@@ -169,14 +169,17 @@ class EarlyStoppingCallback(BaseCallback):
         self._window:      int   = window
         self._patience:    int   = patience
         self._above_count: int   = 0
+        self._should_stop: bool  = False  # FIX: flag read by _on_step to actually halt SB3
 
     def _on_step(self) -> bool:
-        return True
+        # SB3 checks _on_step() return value to stop training.
+        # _on_rollout_end() return value is ignored, so we use this flag instead.
+        return not self._should_stop
 
-    def _on_rollout_end(self) -> bool:
+    def _on_rollout_end(self) -> None:
         rows = _load_last_n(self._log_path, self._window)
         if len(rows) < self._window:
-            return True
+            return
 
         sr = sum(r["success"] for r in rows) / len(rows)
         if sr >= self._target:
@@ -184,9 +187,9 @@ class EarlyStoppingCallback(BaseCallback):
             if self._above_count >= self._patience:
                 print(
                     f"[EarlyStopping] Rolling SR={sr:.2f} ≥ {self._target:.2f} "
-                    f"for {self._patience} checks — stopping."
+                    f"for {self._above_count} consecutive checks — stopping."
                 )
-                self.model.stop_training = True  # _on_rollout_end return value is ignored by SB3
+                self._should_stop = True
         else:
             self._above_count = 0
 
