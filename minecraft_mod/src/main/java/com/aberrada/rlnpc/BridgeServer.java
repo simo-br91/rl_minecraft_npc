@@ -77,6 +77,21 @@ public class BridgeServer {
                 sendJson(ex, 200, env.step(action));
             });
 
+            // /notify — broadcasts a plain-text message to all online players.
+            // Used by the Python training callbacks to show training progress
+            // in-game (start, milestones, completion) without flooding chat.
+            server.createContext("/notify", ex -> {
+                if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+                    sendJson(ex, 405, "{\"error\":\"Use POST\"}"); return;
+                }
+                JsonObject body = parseBody(ex);
+                String message = getString(body, "message", "");
+                if (!message.isEmpty()) {
+                    env.broadcastMessage(message);
+                }
+                sendJson(ex, 200, "{\"ok\":true}");
+            });
+
             // /masks — returns the current 13-element action validity mask.
             // Only GET is accepted (idempotent read; no body needed).
             server.createContext("/masks", ex -> {

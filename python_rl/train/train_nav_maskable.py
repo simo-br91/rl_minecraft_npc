@@ -79,6 +79,7 @@ def main() -> None:
         target_success_rate=0.95,
         window=30,
         patience=1,
+        task_name="Nav Maskable",
     )
 
     checkpoint = checkpoints_dir / "nav_maskable_run1"

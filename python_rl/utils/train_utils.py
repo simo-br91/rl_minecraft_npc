@@ -44,6 +44,31 @@ REBALANCE_WINDOW = 50   # episodes per task before rebalancing
 
 
 # ------------------------------------------------------------------
+# In-game notification helper
+# ------------------------------------------------------------------
+
+def send_game_message(text: str, host: str = "127.0.0.1", port: int = 8765) -> None:
+    """
+    POST a message to the Minecraft bridge's /notify endpoint so it
+    appears in every online player's chat.  Silently ignored if the
+    bridge is offline or the request times out.
+    """
+    try:
+        import json
+        import urllib.request
+        data = json.dumps({"message": text}).encode()
+        req  = urllib.request.Request(
+            f"http://{host}:{port}/notify",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1)
+    except Exception:
+        pass  # Never crash training because a chat message failed
+
+
+# ------------------------------------------------------------------
 # Callbacks
 # ------------------------------------------------------------------
 
@@ -142,6 +167,9 @@ class EarlyStoppingCallback(BaseCallback):
     Stops training when the rolling success rate has exceeded
     ``target_success_rate`` for ``patience`` consecutive rollout ends.
 
+    Also sends in-game chat messages at key moments (training start,
+    SR milestones, and training end) via the /notify bridge endpoint.
+
     Parameters
     ----------
     success_log_path : str
@@ -153,7 +181,13 @@ class EarlyStoppingCallback(BaseCallback):
         Previously hardcoded at 50; now configurable. (Issue 8.4)
     patience : int
         Consecutive checks above target before stopping (default 3).
+    task_name : str
+        Human-readable task label shown in in-game messages (e.g. "Navigation").
+        Leave empty to disable in-game notifications.
     """
+
+    # SR thresholds that trigger a single in-game milestone message each.
+    _MILESTONES: tuple = (0.50, 0.80)
 
     def __init__(
         self,
@@ -161,15 +195,27 @@ class EarlyStoppingCallback(BaseCallback):
         target_success_rate: float = 0.90,
         window:              int   = 50,
         patience:            int   = 3,
+        task_name:           str   = "",
         verbose:             int   = 0,
     ) -> None:
         super().__init__(verbose)
-        self._log_path:    Path  = Path(success_log_path)
-        self._target:      float = target_success_rate
-        self._window:      int   = window
-        self._patience:    int   = patience
-        self._above_count: int   = 0
-        self._should_stop: bool  = False  # FIX: flag read by _on_step to actually halt SB3
+        self._log_path:       Path  = Path(success_log_path)
+        self._target:         float = target_success_rate
+        self._window:         int   = window
+        self._patience:       int   = patience
+        self._task_name:      str   = task_name
+        self._above_count:    int   = 0
+        self._should_stop:    bool  = False  # FIX: flag read by _on_step to actually halt SB3
+        self._stopped_early:  bool  = False
+        self._milestones_hit: set   = set()
+
+    def _notify(self, text: str) -> None:
+        """Send an in-game message (no-op if task_name is not set)."""
+        if self._task_name:
+            send_game_message(text)
+
+    def _on_training_start(self) -> None:
+        self._notify(f"▶ {self._task_name} training started")
 
     def _on_step(self) -> bool:
         # SB3 checks _on_step() return value to stop training.
@@ -182,6 +228,13 @@ class EarlyStoppingCallback(BaseCallback):
             return
 
         sr = sum(r["success"] for r in rows) / len(rows)
+
+        # Milestone notifications (each fires at most once per training run)
+        for milestone in self._MILESTONES:
+            if sr >= milestone and milestone not in self._milestones_hit:
+                self._milestones_hit.add(milestone)
+                self._notify(f"◆ {self._task_name}: {milestone:.0%} SR reached")
+
         if sr >= self._target:
             self._above_count += 1
             if self._above_count >= self._patience:
@@ -189,9 +242,18 @@ class EarlyStoppingCallback(BaseCallback):
                     f"[EarlyStopping] Rolling SR={sr:.2f} ≥ {self._target:.2f} "
                     f"for {self._above_count} consecutive checks — stopping."
                 )
-                self._should_stop = True
+                self._notify(f"✔ {self._task_name} done! SR: {sr:.0%}")
+                self._stopped_early = True
+                self._should_stop   = True
         else:
             self._above_count = 0
+
+    def _on_training_end(self) -> None:
+        """Notify when training ends without hitting the early-stop threshold."""
+        if not self._stopped_early:
+            rows = _load_last_n(self._log_path, self._window)
+            sr   = sum(r["success"] for r in rows) / len(rows) if rows else 0.0
+            self._notify(f"■ {self._task_name} ended (max steps). SR: {sr:.0%}")
 
 
 def make_periodic_checkpoint(

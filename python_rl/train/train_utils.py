@@ -17,6 +17,7 @@ from python_rl.utils.train_utils import (  # noqa: F401
     run_multi_seed,
     load_model_with_warmstart,
     make_maskable_model,
+    send_game_message,
     REBALANCE_WINDOW,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     "run_multi_seed",
     "load_model_with_warmstart",
     "make_maskable_model",
+    "send_game_message",
     "REBALANCE_WINDOW",
 ]

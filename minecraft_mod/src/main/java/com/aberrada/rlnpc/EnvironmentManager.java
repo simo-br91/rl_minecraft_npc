@@ -537,6 +537,23 @@ public class EnvironmentManager {
     }
 
     // ------------------------------------------------------------------
+    // In-game broadcast — called from BridgeServer /notify endpoint
+    // ------------------------------------------------------------------
+
+    /**
+     * Sends a plain-text message to every online player.
+     * Fire-and-forget: runs on the server tick thread and returns immediately.
+     */
+    public void broadcastMessage(String message) {
+        server.execute(() -> {
+            Component component = Component.literal("[RL] " + message);
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                player.sendSystemMessage(component);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
     // FIX 7.4: world access independent of any player being present
     // ------------------------------------------------------------------
 

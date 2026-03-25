@@ -34,10 +34,12 @@ import java.util.List;
  *  - applyHorizontalMove now validates the landing Y via isBlockedAt to
  *    prevent the agent from clipping into the side of a block when stepping
  *    off an elevated surface (ghost-through-block fix). (Bug 3.1)
- *  - attack() enforces an ATTACK_COOLDOWN_STEPS cooldown matching the iron
- *    sword 1.6 attacks/s rate in vanilla Minecraft 1.20.1. Full 6-damage
- *    hits only land once per cooldown window; on-cooldown swings face the
- *    target but deal no damage and grant no reward bonus. (Bug 3.2)
+ *  - attack() enforces an ATTACK_COOLDOWN_STEPS cooldown matching vanilla
+ *    Minecraft 1.20.1 attack-strength mechanics. Hits only land once per
+ *    cooldown window; on-cooldown swings face the target but deal no damage
+ *    and grant no reward bonus, so spamming is less effective. (Bug 3.2)
+ *  - attack() now applies weapon-specific damage: iron sword (slot 0) deals
+ *    6 damage; all other slots (unarmed / tool / food) deal 1 damage.
  */
 public class ActionExecutor {
 
@@ -211,25 +213,34 @@ public class ActionExecutor {
         }
         if (target == null) return false;
 
-        // FIX 3.2: Attack cooldown matching vanilla iron sword (1.6 attacks/s).
+        // Attack cooldown matching vanilla Minecraft 1.20.1 behaviour.
         // Always face the target and return valid=true so the agent isn't
-        // penalised for choosing to attack.  Full 6-damage hits only land when
-        // the cooldown window (ATTACK_COOLDOWN_STEPS ticks) has elapsed since
-        // the previous hit, matching player behaviour in Minecraft 1.20.1.
+        // penalised for choosing to attack.  Damage and reward only land when
+        // ATTACK_COOLDOWN_STEPS have elapsed since the last hit.
+        //
+        // Weapon damage (slot-dependent, like MC 1.20.1):
+        //   Slot 0 — iron sword : 6 damage
+        //   Any other slot      : 1 damage (unarmed / tool / food item)
+        //
+        // On cooldown: faces the mob but deals no damage and gives no attack
+        // reward.  Spamming therefore yields significantly less DPS than
+        // waiting for the cooldown, matching vanilla attack-strength mechanics.
         faceEntity(agent, target);
         int stepsSinceLast = (state != null)
                 ? (state.episodeStep - state.lastAttackStep)
                 : ATTACK_COOLDOWN_STEPS;
         if (stepsSinceLast >= ATTACK_COOLDOWN_STEPS) {
-            target.hurt(agent.damageSources().mobAttack(agent), 6.0f);
+            float damage = (state != null && state.activeSlot == EpisodeState.SLOT_SWORD)
+                    ? 6.0f   // iron sword
+                    : 1.0f;  // unarmed / other item
+            target.hurt(agent.damageSources().mobAttack(agent), damage);
             if (!target.isAlive() && state != null) state.mobsKilled++;
             if (state != null) {
                 state.lastAttackValid = true;
                 state.lastAttackStep  = state.episodeStep;
             }
         }
-        // else: on cooldown — faces the mob but deals no damage and gives no
-        // attack reward, teaching the agent to pace its attacks.
+        // else: on cooldown — face mob only, no damage, no reward.
         return true;
     }
 

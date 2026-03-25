@@ -124,6 +124,7 @@ def main() -> None:
         target_success_rate=0.90,
         window=30,
         patience=1,
+        task_name="Farming",
     )
 
     warmstart = [checkpoints_dir / "farm_run1"] if args.resume else []

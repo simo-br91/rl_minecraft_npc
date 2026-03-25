@@ -92,6 +92,7 @@ def main() -> None:
         target_success_rate=0.80,
         window=30,
         patience=1,
+        task_name="Multitask",
     )
 
     # Warm-start priority: resumed run > best farming > best navigation

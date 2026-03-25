@@ -86,6 +86,7 @@ def main() -> None:
         target_success_rate=0.90,
         window=30,
         patience=1,
+        task_name="Combat",
     )
 
     callbacks = [success_cb, checkpoint_cb, early_stop_cb]

@@ -81,6 +81,7 @@ def main() -> None:
         target_success_rate=0.85,
         window=30,
         patience=2,
+        task_name="Nav Sparse",
     )
 
     warmstart = [checkpoints_dir / cfg.get("checkpoint_name", "nav_sparse_run1")] \

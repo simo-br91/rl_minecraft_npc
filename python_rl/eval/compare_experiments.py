@@ -83,19 +83,28 @@ def plot_comparison(ax_reward, ax_success, runs: list, window: int = 20) -> None
         df_mon = load_monitor(run["monitor_csv"])
         if df_mon is not None:
             rewards = df_mon["r"].tolist()
-            sm      = moving_average(rewards, window)
             ax_reward.plot(range(len(rewards)), rewards, alpha=0.18,
                            linewidth=0.7, color=color)
-            ax_reward.plot(range(window - 1, len(rewards)), sm,
-                           linewidth=2, label=label, color=color)
+            if len(rewards) >= window:
+                sm = moving_average(rewards, window)
+                ax_reward.plot(range(window - 1, len(rewards)), sm,
+                               linewidth=2, label=label, color=color)
+            else:
+                # not enough data to smooth — plot raw as the main line
+                ax_reward.plot(range(len(rewards)), rewards,
+                               linewidth=2, label=label, color=color)
         df_suc = load_success(run["success_csv"])
         if df_suc is not None:
             successes = df_suc["success"].tolist()
-            sr        = moving_average(successes, window)
             ax_success.plot(range(len(successes)), successes, alpha=0.12,
                             linewidth=0.6, color=color)
-            ax_success.plot(range(window - 1, len(successes)), sr,
-                            linewidth=2, label=label, color=color)
+            if len(successes) >= window:
+                sr = moving_average(successes, window)
+                ax_success.plot(range(window - 1, len(successes)), sr,
+                                linewidth=2, label=label, color=color)
+            else:
+                ax_success.plot(range(len(successes)), successes,
+                                linewidth=2, label=label, color=color)
 
 
 # ------------------------------------------------------------------

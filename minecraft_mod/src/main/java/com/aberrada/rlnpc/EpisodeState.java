@@ -176,15 +176,18 @@ public class EpisodeState {
             case "combat" -> {
                 this.taskName = "combat";
                 this.taskId   = 2.0;
-                // FIX 3.2: Increased from 200 → 400 so the agent has enough
-                // time to navigate to mobs (6–10 blocks away) and kill all 3
-                // with the 12-step attack cooldown.  200 steps was too tight.
-                this.maxSteps = 400;
+                // Increased from 400 → 600: agent needs to navigate to mobs
+                // (up to 10 blocks), kill all 3 with the 12-step cooldown,
+                // then reach the gold-block marker — 400 was too tight.
+                this.maxSteps = 600;
             }
             case "multitask" -> {
                 this.taskName = "multitask";
                 this.taskId   = 3.0;
-                this.maxSteps = 400;
+                // Increased from 400 → 800: multitask requires killing mobs,
+                // harvesting all crops, AND reaching the nav target — needs
+                // significantly more time than a single-task episode.
+                this.maxSteps = 800;
             }
             default -> {
                 this.taskName = "navigation";
