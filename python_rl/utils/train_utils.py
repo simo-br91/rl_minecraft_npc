@@ -186,10 +186,9 @@ class EarlyStoppingCallback(BaseCallback):
                     f"[EarlyStopping] Rolling SR={sr:.2f} ≥ {self._target:.2f} "
                     f"for {self._patience} checks — stopping."
                 )
-                return False
+                self.model.stop_training = True  # _on_rollout_end return value is ignored by SB3
         else:
             self._above_count = 0
-        return True
 
 
 def make_periodic_checkpoint(

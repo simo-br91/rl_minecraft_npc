@@ -146,6 +146,13 @@ public class ActionExecutor {
         if (landY < cy - 0.01 && isBlockedAt(agent, tx, landY, tz)) {
             landY = cy;
         }
+        // FIX: Manually update walkDist so the PlayerModel animation system
+        // (leg/arm swing) knows the entity has moved. moveTo() teleports the
+        // entity directly and bypasses the physics tick that normally increments
+        // walkDist, causing the NPC to appear frozen/unanimated while walking.
+        double dx = tx - agent.getX();
+        double dz = tz - agent.getZ();
+        agent.walkDist += (float) Math.sqrt(dx * dx + dz * dz);
         float  yaw   = agent.getYRot();
         agent.moveTo(tx, landY, tz, yaw, agent.getXRot());
         syncRotations(agent, yaw, agent.getXRot());
