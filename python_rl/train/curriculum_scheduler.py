@@ -236,3 +236,40 @@ class FarmingCurriculumScheduler(CurriculumScheduler):
             "num_crops":      lvl["num_crops"],
             "full_farm_cycle": lvl["full_farm_cycle"],
         }
+
+
+# ------------------------------------------------------------------
+# Combat curriculum scheduler (Fix 4.5)
+# ------------------------------------------------------------------
+
+COMBAT_CURRICULUM_LEVELS: list[dict] = [
+    {"level": 1, "num_mobs": 1, "mob_dist_min": 2.0, "mob_dist_max": 4.0,
+     "description": "1 mob, close range (2–4 b)"},
+    {"level": 2, "num_mobs": 2, "mob_dist_min": 4.0, "mob_dist_max": 7.0,
+     "description": "2 mobs, medium range (4–7 b)"},
+    {"level": 3, "num_mobs": 3, "mob_dist_min": 6.0, "mob_dist_max": 10.0,
+     "description": "3 mobs, full range (6–10 b)"},
+]
+
+
+class CombatCurriculumScheduler(CurriculumScheduler):
+    """
+    Curriculum scheduler for combat.
+
+    Levels progress from a single close-range mob to the full 3-mob,
+    far-range episode so the agent learns to fight before having to
+    navigate and fight simultaneously.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        kwargs.setdefault("levels", COMBAT_CURRICULUM_LEVELS)
+        super().__init__(**kwargs)
+
+    def get_reset_options(self, task: str = "combat") -> dict:
+        lvl = self.current_level
+        return {
+            "task":         task,
+            "num_mobs":     lvl["num_mobs"],
+            "mob_dist_min": lvl["mob_dist_min"],
+            "mob_dist_max": lvl["mob_dist_max"],
+        }

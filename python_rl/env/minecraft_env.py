@@ -153,6 +153,10 @@ class MinecraftEnv(gym.Env):
         num_obstacles:   int   = int(opts.get("num_obstacles",    -1))
         num_crops:       int   = int(opts.get("num_crops",        self.num_crops))
         full_farm_cycle: bool  = bool(opts.get("full_farm_cycle", self.full_farm_cycle))
+        # Fix 4.5: combat curriculum parameters (-1 / -1.0 = server defaults)
+        num_mobs:        int   = int(opts.get("num_mobs",         -1))
+        mob_dist_min:    float = float(opts.get("mob_dist_min",   -1.0))
+        mob_dist_max:    float = float(opts.get("mob_dist_max",   -1.0))
 
         payload: Dict[str, Any] = {
             "task":            task,
@@ -169,6 +173,13 @@ class MinecraftEnv(gym.Env):
             payload["max_dist"]      = max_dist
         if num_obstacles >= 0:
             payload["num_obstacles"] = num_obstacles
+        # Fix 4.5: only send combat curriculum params when explicitly set
+        if num_mobs >= 0:
+            payload["num_mobs"]      = num_mobs
+        if mob_dist_min >= 0:
+            payload["mob_dist_min"]  = mob_dist_min
+        if mob_dist_max >= 0:
+            payload["mob_dist_max"]  = mob_dist_max
 
         data = self._post("/reset", payload, timeout=15)
         if "error" in data:

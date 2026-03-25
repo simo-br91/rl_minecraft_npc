@@ -31,6 +31,13 @@ import java.util.List;
  *  - findSurfaceY now scans 8 blocks down (was 3 which was too shallow for
  *    terrain drops near cliff edges). (Bug 2.10)
  *  - Pitch smoothing constants documented.
+ *  - applyHorizontalMove now validates the landing Y via isBlockedAt to
+ *    prevent the agent from clipping into the side of a block when stepping
+ *    off an elevated surface (ghost-through-block fix). (Bug 3.1)
+ *  - attack() enforces an ATTACK_COOLDOWN_STEPS cooldown matching the iron
+ *    sword 1.6 attacks/s rate in vanilla Minecraft 1.20.1. Full 6-damage
+ *    hits only land once per cooldown window; on-cooldown swings face the
+ *    target but deal no damage and grant no reward bonus. (Bug 3.2)
  */
 public class ActionExecutor {
 
@@ -52,6 +59,9 @@ public class ActionExecutor {
 
     // Surface scan depth — FIX 2.10: was 3, now 8 to handle terrain drops
     private static final int     SURFACE_SCAN_DEPTH = 8;
+
+    // Attack cooldown — FIX 3.2: iron sword 1.6 attacks/s at 20 t/s = 12.5 ticks
+    static final int             ATTACK_COOLDOWN_STEPS = 12;
 
     // ------------------------------------------------------------------
     // Entry point
@@ -127,6 +137,15 @@ public class ActionExecutor {
         double cy = agent.getY();
         if (isBlockedAt(agent, tx, cy, tz)) return false;
         double landY = findSurfaceY(agent, tx, cy, tz);
+        // FIX 3.1: Ghost-through-block prevention.
+        // When the surface snap would drop the agent (landY < cy), verify that
+        // the full AABB at (tx, landY) is clear.  If the back of the agent's
+        // bounding box would clip into the side of the block just stepped off,
+        // keep the current height instead.  The agent slides forward each step
+        // until the AABB completely clears the block edge, then drops cleanly.
+        if (landY < cy - 0.01 && isBlockedAt(agent, tx, landY, tz)) {
+            landY = cy;
+        }
         float  yaw   = agent.getYRot();
         agent.moveTo(tx, landY, tz, yaw, agent.getXRot());
         syncRotations(agent, yaw, agent.getXRot());
@@ -185,10 +204,25 @@ public class ActionExecutor {
         }
         if (target == null) return false;
 
+        // FIX 3.2: Attack cooldown matching vanilla iron sword (1.6 attacks/s).
+        // Always face the target and return valid=true so the agent isn't
+        // penalised for choosing to attack.  Full 6-damage hits only land when
+        // the cooldown window (ATTACK_COOLDOWN_STEPS ticks) has elapsed since
+        // the previous hit, matching player behaviour in Minecraft 1.20.1.
         faceEntity(agent, target);
-        target.hurt(agent.damageSources().mobAttack(agent), 6.0f);
-        if (!target.isAlive() && state != null) state.mobsKilled++;
-        if (state != null) state.lastAttackValid = true;
+        int stepsSinceLast = (state != null)
+                ? (state.episodeStep - state.lastAttackStep)
+                : ATTACK_COOLDOWN_STEPS;
+        if (stepsSinceLast >= ATTACK_COOLDOWN_STEPS) {
+            target.hurt(agent.damageSources().mobAttack(agent), 6.0f);
+            if (!target.isAlive() && state != null) state.mobsKilled++;
+            if (state != null) {
+                state.lastAttackValid = true;
+                state.lastAttackStep  = state.episodeStep;
+            }
+        }
+        // else: on cooldown — faces the mob but deals no damage and gives no
+        // attack reward, teaching the agent to pace its attacks.
         return true;
     }
 

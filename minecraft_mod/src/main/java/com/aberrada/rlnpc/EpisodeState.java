@@ -45,6 +45,18 @@ public class EpisodeState {
     public double  targetY = 4.0;
     public double  targetZ = 0.0;
 
+    /**
+     * Permanent navigation waypoint for the multitask episode.
+     *
+     * In multitask mode, {@code targetX/Z} is overwritten by
+     * {@code updateActiveCrop} to always point at the nearest unharvested
+     * crop. The original nav goal (gold-block marker) is stored here so the
+     * multitask success condition can correctly check distance to the marker
+     * rather than the last harvested crop. (Fix 4.1)
+     */
+    public double  navTargetX = 8.0;
+    public double  navTargetZ = 0.0;
+
     // ------------------------------------------------------------------
     // Curriculum / experiment config (set on each reset)
     // ------------------------------------------------------------------
@@ -121,6 +133,18 @@ public class EpisodeState {
     public int        mobsKilled      = 0;
     /** How many times the agent was hit. */
     public int        timesHit        = 0;
+    /**
+     * Episode step at which the last successful (full-damage) attack landed.
+     * Initialised to a large negative value so the cooldown is always
+     * expired at the start of a new episode. (FIX 3.2)
+     */
+    public int        lastAttackStep  = -100;
+    /**
+     * Distance to the nearest alive hostile mob, updated every step.
+     * Used by RewardCalculator to provide a proximity incentive in combat.
+     * Set to MAX_VALUE when no mobs are present. (Fix 4.3)
+     */
+    public double     nearestMobDist  = Double.MAX_VALUE;
 
     // ------------------------------------------------------------------
     // Pitch (vertical look) for human-like movement
@@ -152,7 +176,10 @@ public class EpisodeState {
             case "combat" -> {
                 this.taskName = "combat";
                 this.taskId   = 2.0;
-                this.maxSteps = 200;
+                // FIX 3.2: Increased from 200 → 400 so the agent has enough
+                // time to navigate to mobs (6–10 blocks away) and kill all 3
+                // with the 12-step attack cooldown.  200 steps was too tight.
+                this.maxSteps = 400;
             }
             case "multitask" -> {
                 this.taskName = "multitask";
@@ -185,6 +212,9 @@ public class EpisodeState {
         this.mobsKilled         = 0;
         this.timesHit           = 0;
         this.isDead             = false;
+        this.lastAttackStep     = -100;
+        this.nearestMobDist     = Double.MAX_VALUE;
+        // navTargetX/Z are set by TaskSetup on each reset and don't need clearing.
         this.isSprinting        = false;
         this.targetPitch        = 0.0f;
         this.currentPitch       = 0.0f;

@@ -56,10 +56,15 @@ public class BridgeServer {
                 int     numObstacles    = getInt(body,    "num_obstacles",      -1);
                 int     numCrops        = getInt(body,    "num_crops",          5);
                 boolean fullFarmCycle   = getBool(body,   "full_farm_cycle",   false);
+                // Combat curriculum parameters (Fix 4.5): -1 means "use defaults"
+                int     numMobs         = getInt(body,    "num_mobs",          -1);
+                double  mobDistMin      = getDouble(body, "mob_dist_min",      -1.0);
+                double  mobDistMax      = getDouble(body, "mob_dist_max",      -1.0);
 
                 int seed = getInt(body,"seed", -1);
                 String result = env.reset(task, sparseReward, minDist, maxDist,
-                                          numObstacles, numCrops, fullFarmCycle, seed);
+                                          numObstacles, numCrops, fullFarmCycle, seed,
+                                          numMobs, mobDistMin, mobDistMax);
                 sendJson(ex, 200, result);
             });
 
