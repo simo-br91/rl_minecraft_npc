@@ -158,11 +158,25 @@ public class EnvironmentManager {
                         state.navTargetZ = state.targetZ;
                         int nc = numCrops > 0 ? numCrops : DEFAULT_CROP_COUNT;
                         TaskSetup.configureFarming(level, state, nc, fullFarmCycle, rng);
+                        // FIX: restore multitask maxSteps after configureNavigation and
+                        // configureFarming both overwrite it with single-task budgets.
+                        state.maxSteps = 800;
                         state.updateActiveCrop(0, 0);
                         spawnX = (rng.nextDouble() - 0.5) * 3.0;
                         spawnZ = (rng.nextDouble() - 0.5) * 3.0;
                         spawnY = TaskSetup.resolveStandY(level, spawnX, spawnZ);
+                        // FIX: place the gold-block marker at the nav waypoint, NOT at
+                        // the nearest crop. Previously state.targetX/Z pointed at the
+                        // crop (set by updateActiveCrop above), so the marker replaced a
+                        // wheat crop with a solid gold block, making that crop
+                        // un-harvestable and causing the agent to get permanently stuck.
+                        double cropTargetX = state.targetX;
+                        double cropTargetZ = state.targetZ;
+                        state.targetX = state.navTargetX;
+                        state.targetZ = state.navTargetZ;
                         TaskSetup.placeNavigationMarker(level, state);
+                        state.targetX = cropTargetX;
+                        state.targetZ = cropTargetZ;
                         spawnCombatMobs(level, spawnX, spawnZ, 2, 6.0, 10.0);
                     }
                     default -> {   // navigation
@@ -272,6 +286,15 @@ public class EnvironmentManager {
 
                 if ("farming".equals(state.taskName) || "multitask".equals(state.taskName)) {
                     state.updateActiveCrop(agent.getX(), agent.getZ());
+                }
+                // FIX: once all crops are harvested in multitask, redirect the
+                // navigation target to the gold-block waypoint so the progress
+                // reward (0.08 * Δdist) guides the agent toward the nav target.
+                // Without this, targetX/Z stays at the last crop after harvest and
+                // the agent has no shaping signal to reach the nav goal.
+                if ("multitask".equals(state.taskName) && state.allCropsHarvested()) {
+                    state.targetX = state.navTargetX;
+                    state.targetZ = state.navTargetZ;
                 }
 
                 boolean cropInFront = ObservationBuilder.isMatureCropInFront(agent);

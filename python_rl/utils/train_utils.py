@@ -463,14 +463,19 @@ def load_model_with_warmstart(
     If none found, create a fresh PPO from config.
     Key hyperparameters from config are always applied to the loaded model.
     """
+    from stable_baselines3.common.utils import get_schedule_fn
     for path in candidates:
         p = Path(path)
         if p.with_suffix(".zip").exists():
             print(f"[train_utils] Warm-starting from {p}")
-            model = PPO.load(str(p), env=env)
-            model.learning_rate   = config.get("learning_rate", model.learning_rate)
+            try:
+                model = PPO.load(str(p), env=env)
+            except ValueError as e:
+                print(f"[train_utils] Skipping {p} (incompatible spaces): {e}")
+                continue
+            model.learning_rate   = get_schedule_fn(config.get("learning_rate", model.learning_rate))
             model.ent_coef        = config.get("ent_coef",      model.ent_coef)
-            model.clip_range      = config.get("clip_range",    model.clip_range)
+            model.clip_range      = get_schedule_fn(config.get("clip_range",    0.2))
             model.gamma           = config.get("gamma",         model.gamma)
             model.tensorboard_log = str(Path(logs_dir) / "tb")
             model.verbose = 1
